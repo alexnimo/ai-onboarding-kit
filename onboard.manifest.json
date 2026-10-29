@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/schema",
+  "version": "1.2.0",
+  "description": "AI agent onboarding manifest. Drives scaffold scripts and the Devin onboarding prompt. Edit this file to extend the kit — add skills, templates, placeholders, agent profiles, or MCP servers.",
+
+  "directories": [
+    ".agents",
+    "docs"
+  ],
+
+  "templates": [
+    { "src": "templates/AGENTS.md.tmpl",                         "dest": "AGENTS.md",                         "overwrite": false },
+    { "src": "templates/.agents/SYSTEM.md.tmpl",                 "dest": ".agents/SYSTEM.md",                 "overwrite": false },
+    { "src": "templates/.agents/ARCHITECTURE_PATTERNS.md.tmpl",  "dest": ".agents/ARCHITECTURE_PATTERNS.md",  "overwrite": false },
+    { "src": "templates/.agents/ENGINEERING_RULES.md.tmpl",      "dest": ".agents/ENGINEERING_RULES.md",      "overwrite": false },
+    { "src": "templates/.agents/BUG_FIX_LOG.md.tmpl",            "dest": ".agents/BUG_FIX_LOG.md",            "overwrite": false },
+    { "src": "templates/.agents/PRD.md.tmpl",                    "dest": ".agents/PRD.md",                    "overwrite": false },
+    { "src": "templates/.agents/DEV_WORKFLOW.md.tmpl",           "dest": ".agents/DEV_WORKFLOW.md",           "overwrite": false }
+  ],
+
+  "skills": [
+    { "name": "brainstorming",                    "source": "obra/superpowers",            "skill": "brainstorming",                    "category": "thinking",     "required": true },
+    { "name": "grill-me",                         "source": "mattpocock/skills",           "skill": "grill-me",                         "category": "thinking",     "required": true },
+    { "name": "grill-with-docs",                  "source": "mattpocock/skills",           "skill": "grill-with-docs",                  "category": "thinking",     "required": true },
+    { "name": "spec-driven-development",          "source": "addyosmani/agent-skills",     "skill": "spec-driven-development",          "category": "planning",     "required": true },
+    { "name": "planning-and-task-breakdown",      "source": "addyosmani/agent-skills",     "skill": "planning-and-task-breakdown",      "category": "planning",     "required": true },
+    { "name": "test-driven-development",          "source": "obra/superpowers",            "skill": "test-driven-development",          "category": "planning",     "required": true },
+    { "name": "code-review-and-quality",          "source": "addyosmani/agent-skills",     "skill": "code-review-and-quality",          "category": "quality",      "required": true },
+    { "name": "debugging-and-error-recovery",     "source": "addyosmani/agent-skills",     "skill": "debugging-and-error-recovery",     "category": "debugging",    "required": true },
+    { "name": "diagnosing-bugs",                  "source": "mattpocock/skills",           "skill": "diagnosing-bugs",                  "category": "debugging",    "required": true },
+    { "name": "using-git-worktrees",              "source": "obra/superpowers",            "skill": "using-git-worktrees",              "category": "workflow",     "required": true },
+    { "name": "handoff",                          "source": "mattpocock/skills",           "skill": "handoff",                          "category": "workflow",     "required": true },
+    { "name": "documentation-and-adrs",           "source": "addyosmani/agent-skills",     "skill": "documentation-and-adrs",           "category": "documentation","required": true },
+    { "name": "find-skills",                      "source": "vercel-labs/skills",          "skill": "find-skills",                      "category": "meta",         "required": true },
+    { "name": "full-output-enforcement",          "source": "Leonxlnx/taste-skill",        "skill": "output-skill",                     "category": "meta",         "required": false },
+    { "name": "excalidraw-diagram-generator",     "source": "github/awesome-copilot",      "skill": "excalidraw-diagram-generator",     "category": "documentation","required": true },
+
+    { "name": "api-and-interface-design",         "source": "addyosmani/agent-skills",     "skill": "api-and-interface-design",         "category": "backend",      "required": false },
+    { "name": "security-and-hardening",           "source": "addyosmani/agent-skills",     "skill": "security-and-hardening",           "category": "backend",      "required": false },
+    { "name": "performance-optimization",         "source": "addyosmani/agent-skills",     "skill": "performance-optimization",         "category": "backend",      "required": false },
+    { "name": "observability-and-instrumentation", "source": "addyosmani/agent-skills",    "skill": "observability-and-instrumentation","category": "backend",      "required": false },
+    { "name": "improve-codebase-architecture",    "source": "mattpocock/skills",           "skill": "improve-codebase-architecture",    "category": "backend",      "required": false },
+    { "name": "browser-testing-with-devtools",    "source": "addyosmani/agent-skills",     "skill": "browser-testing-with-devtools",    "category": "testing",      "required": false },
+
+    { "name": "design-taste-frontend",            "source": "Leonxlnx/taste-skill",        "skill": "taste-skill",                      "category": "frontend",     "required": false },
+    { "name": "frontend-ui-engineering",          "source": "addyosmani/agent-skills",     "skill": "frontend-ui-engineering",          "category": "frontend",     "required": false },
+    { "name": "web-design-guidelines",            "source": "vercel-labs/agent-skills",    "skill": "web-design-guidelines",            "category": "frontend",     "required": false },
+    { "name": "redesign-existing-projects",       "source": "Leonxlnx/taste-skill",        "skill": "redesign-skill",                   "category": "frontend",     "required": false },
+    { "name": "high-end-visual-design",           "source": "Leonxlnx/taste-skill",        "skill": "soft-skill",                       "category": "frontend",     "required": false },
+    { "name": "minimalist-ui",                    "source": "Leonxlnx/taste-skill",        "skill": "minimalist-skill",                 "category": "frontend",     "required": false },
+    { "name": "stitch-design-taste",              "source": "Leonxlnx/taste-skill",        "skill": "stitch-skill",                     "category": "frontend",     "required": false },
+    { "name": "imagegen-frontend-web",            "source": "Leonxlnx/taste-skill",        "skill": "imagegen-frontend-web",            "category": "frontend",     "required": false },
+    { "name": "imagegen-frontend-mobile",         "source": "Leonxlnx/taste-skill",        "skill": "imagegen-frontend-mobile",         "category": "frontend",     "required": false },
+    { "name": "vercel-react-best-practices",      "source": "vercel-labs/agent-skills",    "skill": "react-best-practices",             "category": "frontend",     "required": false },
+
+    { "name": "stop-slop",                        "source": "hardikpandya/stop-slop",      "skill": "stop-slop",                        "category": "frontend",     "required": false },
+    { "name": "impeccable",                       "source": "pbakaus/impeccable",          "skill": "impeccable",                       "category": "frontend",     "required": false },
+    { "name": "variate",                          "source": "Nutlope/variate",             "skill": "variate",                          "category": "frontend",     "required": false },
+    { "name": "improve-ui",                       "source": "ibelick/ui-skills",           "skill": "improve-ui",                       "category": "frontend",     "required": false },
+    { "name": "baseline-ui",                      "source": "ibelick/ui-skills",           "skill": "baseline-ui",                      "category": "frontend",     "required": false },
+    { "name": "fixing-accessibility",             "source": "ibelick/ui-skills",           "skill": "fixing-accessibility",             "category": "frontend",     "required": false },
+    { "name": "fixing-motion-performance",        "source": "ibelick/ui-skills",           "skill": "fixing-motion-performance",        "category": "frontend",     "required": false },
+    { "name": "fixing-metadata",                  "source": "ibelick/ui-skills",           "skill": "fixing-metadata",                  "category": "frontend",     "required": false },
+    { "name": "create-design-md",                 "source": "ibelick/ui-skills",           "skill": "create-design-md",                 "category": "frontend",     "required": false }
+  ],
+
+  "cliTools": [
+    { "name": "skillui", "package": "skillui", "check": "skillui --version", "install": "npm install -g skillui", "category": "frontend", "required": false, "hint": "Design-system extractor CLI (url/dir/repo → DESIGN.md + tokens + screenshots). Used by ui-design-orchestrator for redesign/match-a-site briefs. Ultra mode needs Playwright." }
+  ],
+
+  "templateSkills": [
+    { "src": "templates/skills/ui-design-orchestrator", "dest": "ui-design-orchestrator", "required": true, "hint": "Master router for all UX/UI work. Copied to ~/.agents/skills/ by the scaffold (not installed via npx skills add). Required by the AGENTS.md UX/UI deferral." }
+  ],
+
+  "placeholders": [
+    { "key": "PROJECT_NAME",              "hint": "Infer from the directory name or ask the user." },
+    { "key": "PROJECT_DESCRIPTION",       "hint": "One-line description of what the project does. Ask the user if not obvious." },
+    { "key": "PROJECT_MATURITY",          "hint": "Detected maturity level: 'design-phase' (no code, only docs), 'early-stage' (some code, small/incomplete), 'mature' (significant codebase with established patterns). Determines fill depth for all other placeholders." },
+    { "key": "PACKAGE_MANAGER",           "hint": "Detect from lockfiles: uv (uv.lock/pyproject.toml), npm (package-lock.json), pnpm (pnpm-lock.yaml), yarn (yarn.lock), cargo (Cargo.toml), go (go.mod). TBD for design-phase." },
+    { "key": "INSTALL_COMMAND",           "hint": "Command to install dependencies (e.g. 'uv sync', 'npm install', 'pnpm install'). TBD for design-phase." },
+    { "key": "DEV_SERVER_COMMAND",        "hint": "Command to start the dev server. Detect from scripts in package.json, pyproject.toml, Makefile, etc. TBD for design-phase." },
+    { "key": "PROD_SERVER_COMMAND",       "hint": "Command to start the production server, if different from dev. TBD for design-phase." },
+    { "key": "TEST_COMMAND",              "hint": "Command to run the test suite. Detect from config files. TBD for design-phase." },
+    { "key": "DB_MIGRATION_COMMAND",      "hint": "Command to run DB migrations, if applicable. Leave as 'N/A' if no database. TBD for design-phase." },
+    { "key": "DEV_PORT",                  "hint": "Port the dev server runs on. Detect from config or ask. TBD for design-phase." },
+    { "key": "PROD_PORT",                 "hint": "Port the prod server runs on, if different. Leave as 'N/A' if single-environment. TBD for design-phase." },
+    { "key": "STACK_NOTES",               "hint": "Key stack-specific invariants the agent must know (reload behavior, cache invalidation, silent import failures, proxy config, etc.). Inspect the codebase for these. TBD for design-phase/early-stage." },
+    { "key": "SYSTEM_OVERVIEW",           "hint": "High-level description of the system's purpose and main subsystems. For mature codebases, infer from code structure. For design-phase, ask the user or TBD." },
+    { "key": "SERVICE_BOUNDARIES",        "hint": "Main services, components, or modules and their responsibilities. For monoliths, list major subsystems. TBD for design-phase." },
+    { "key": "DATA_FLOW",                 "hint": "How data moves through the system: entry points, transformations, storage, outputs. TBD for design-phase." },
+    { "key": "EXTERNAL_INTEGRATIONS",     "hint": "External services, APIs, databases, and third-party integrations. TBD for design-phase." },
+    { "key": "SUBSYSTEM_DETAILS",         "hint": "One subsection per major subsystem: purpose, key files, invariants. TBD for design-phase." },
+    { "key": "CANONICAL_PATTERNS",        "hint": "List of architectural patterns the project follows (async patterns, caching, event flow, etc.). For mature codebases, discover from code. TBD for design-phase/early-stage." },
+    { "key": "CONSISTENCY_CHECKLIST",     "hint": "Checklist of invariants to verify before implementing features. Derive from CANONICAL_PATTERNS. TBD for design-phase." },
+    { "key": "INVARIANTS",                "hint": "Non-negotiable engineering rules specific to this project (deployment order, schema rules, etc.). TBD for design-phase." },
+    { "key": "ASYNC_RULES",               "hint": "Async/concurrency rules (e.g. 'All blocking I/O via asyncio.to_thread()'). 'N/A — synchronous' if no async. TBD for design-phase." },
+    { "key": "ERROR_HANDLING_PATTERNS",   "hint": "How the project handles errors: exceptions, result types, error codes, boundaries. TBD for design-phase." },
+    { "key": "TESTING_PATTERNS",          "hint": "Testing framework, test location, test patterns. TBD for design-phase." },
+    { "key": "SCHEMA_RULES",              "hint": "Database schema conventions. 'N/A — no database' if no DB. TBD for design-phase." },
+    { "key": "DEPENDENCY_RULES",          "hint": "Dependency management rules (e.g. 'Use only uv, never pip'). TBD for design-phase." },
+    { "key": "REGRESSION_EXAMPLES",       "hint": "Table of past bugs/outages and which verification step would have caught them. Stub table for design-phase/new projects. For mature projects, check the bug log or ask the user. Do NOT invent hypothetical bugs." },
+    { "key": "PROJECT_SPECIFIC_SKILLS",   "hint": "Project-specific skills in .windsurf/skills/ or .agents/skills/ that are not community skills. List their paths. '<!-- No project-specific skills yet -->' if none." },
+    { "key": "TESTING_SKILLS",            "hint": "Testing skills referenced in AGENTS.md. For mature/early-stage: 'test-driven-development', 'browser-testing-with-devtools', 'web-design-guidelines' + any project-specific skills found. TBD for design-phase." },
+    { "key": "PROD_VERIFICATION_STEPS",   "hint": "Production verification steps after merging to main (restart, migrations, E2E checks). '<!-- N/A — no production environment yet -->' for design-phase. For mature: document the full verification flow." },
+    { "key": "VISION",                    "hint": "What the product is trying to achieve. Ask the user — do NOT infer from design docs. TBD if not defined." },
+    { "key": "IN_SCOPE",                  "hint": "What is currently being built. Ask the user or TBD." },
+    { "key": "OUT_OF_SCOPE",              "hint": "What is explicitly NOT being built. Ask the user or TBD." },
+    { "key": "PRIORITIES",                "hint": "Current priorities and roadmap, ordered by importance. TBD for design-phase." },
+    { "key": "NFRS",                      "hint": "Non-functional requirements (performance, reliability, security, accessibility). TBD for design-phase." },
+    { "key": "USER_PERSONAS",             "hint": "Who uses this product and their goals. Ask the user — do NOT infer from design docs. TBD if not defined." },
+    { "key": "ENV_SETUP",                 "hint": "Step-by-step instructions to get the dev environment running from a fresh clone. TBD for design-phase." },
+    { "key": "DEV_PROD_SAFETY",           "hint": "Rules for working with dev vs prod environments. '<!-- N/A — no dev/prod environments yet -->' for design-phase." },
+    { "key": "SERVER_RESTART_NOTES",      "hint": "Dev server hot-reload reliability and when manual restart is needed. '<!-- N/A — no server yet -->' for design-phase." },
+    { "key": "BUG_LOG_ENTRIES",           "hint": "Historical bugs for seeding the bug fix log. '<!-- No bugs yet — project is in design phase -->' for new projects. For mature projects, seed with known historical bugs. Do NOT invent bugs." },
+    { "key": "CANONICAL_DOC_MAP_EXTRA",   "hint": "Extra rows for the canonical doc map table (project-specific doc locations). Leave empty if none." },
+    { "key": "PORT_ASSIGNMENTS_EXTRA",    "hint": "Extra port assignments beyond dev/prod servers (e.g. database, Redis, other services). Leave empty if none." }
+  ],
+
+  "mcpServers": [
+    {
+      "name": "semble",
+      "required": true,
+      "hint": "Code search — install via MCP config",
+      "config": {
+        "command": "npx",
+        "args": ["-y", "@semblemcp/server"],
+        "env": {}
+      }
+    },
+    {
+      "name": "code-review-graph",
+      "required": true,
+      "hint": "Impact analysis graph — install via MCP config",
+      "config": {
+        "command": "npx",
+        "args": ["-y", "@code-review-graph/mcp-server"],
+        "env": {}
+      }
+    },
+    {
+      "name": "chrome-devtools",
+      "required": false,
+      "hint": "Browser debugging — install via MCP config",
+      "config": {
+        "command": "npx",
+        "args": ["-y", "chrome-devtools-mcp@latest"],
+        "env": {}
+      }
+    }
+  ],
+
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "matcher": "exec|read|grep|webfetch|web_search",
+      "type": "command",
+      "command": "context-mode hook claude-code pretooluse",
+      "required": false,
+      "hint": "Context-mode pre-tool hook — injects relevant context before tool use. Requires context-mode installed."
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": "",
+      "type": "command",
+      "command": "context-mode hook claude-code posttooluse",
+      "required": false,
+      "hint": "Context-mode post-tool hook — captures context after tool use. Requires context-mode installed."
+    },
+    {
+      "event": "SessionStart",
+      "matcher": "",
+      "type": "command",
+      "command": "context-mode hook claude-code sessionstart",
+      "required": false,
+      "hint": "Context-mode session start hook — initializes context for the session. Requires context-mode installed."
+    },
+    {
+      "event": "Stop",
+      "matcher": "",
+      "type": "command",
+      "command": "context-mode hook claude-code stop",
+      "required": false,
+      "hint": "Context-mode stop hook — cleanup on session end. Requires context-mode installed."
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": "edit|write",
+      "type": "command",
+      "command": "ui-design-orchestrator audit-hook",
+      "required": false,
+      "hint": "Anti-slop audit hook — fires after edits to UI files (.tsx/.jsx/.vue/.svelte/.html/.css). Checks for .impeccable/config.json: if present, defers to impeccable's own two-speed design hooks (per-edit + end-of-session, DESIGN.md-aware); if absent, runs npx impeccable detect as fallback (if the npm package is available) or the orchestrator's audit mode (stop-slop + impeccable audit/critique). Safety net for the orchestrator's mandatory phase 3. Requires ui-design-orchestrator installed. Only active for hook-capable agents (devin/hermes/opencode/claude-code)."
+    }
+  ],
+
+  "rules": [
+    { "src": "templates/rules/dev-environment.md.tmpl",   "dest": "dev-environment.md",   "overwrite": false },
+    { "src": "templates/rules/coding-standards.md.tmpl",  "dest": "coding-standards.md",  "overwrite": false }
+  ],
+
+  "agentProfiles": {
+    "devin": {
+      "instructionsFile": "AGENTS.md",
+      "mcpConfigPath": ".devin/config.json",
+      "mcpConfigKey": "mcpServers",
+      "hooksConfigPath": ".devin/hooks.v1.json",
+      "hooksConfigFormat": "standalone",
+      "rulesDir": ".windsurf/rules",
+      "rulesEnabled": true,
+      "skillDirs": ["~/.agents/skills"],
+      "readConfigFrom": { "cursor": true, "windsurf": true, "claude": true },
+      "notes": "Devin reads AGENTS.md at project root. Project MCP at .devin/config.json (mcpServers key). Hooks at .devin/hooks.v1.json (standalone). Also reads .windsurf/rules/ and .cursor/rules/ via read_config_from. Global MCP at ~/.codeium/windsurf/mcp_config.json (shared with Windsurf)."
+    },
+    "hermes": {
+      "instructionsFile": "AGENTS.md",
+      "mcpConfigPath": ".hermes/mcp.json",
+      "mcpConfigKey": "mcpServers",
+      "hooksConfigPath": ".hermes/hooks.json",
+      "hooksConfigFormat": "standalone",
+      "rulesDir": ".hermes/rules",
+      "rulesEnabled": false,
+      "skillDirs": ["~/.agents/skills"],
+      "notes": "Hermes reads AGENTS.md. MCP config at .hermes/mcp.json. Hooks at .hermes/hooks.json. Skills from ~/.agents/skills (global, shared)."
+    },
+    "opencode": {
+      "instructionsFile": "AGENTS.md",
+      "mcpConfigPath": ".opencode/mcp.json",
+      "mcpConfigKey": "mcpServers",
+      "hooksConfigPath": ".opencode/hooks.json",
+      "hooksConfigFormat": "standalone",
+      "rulesDir": ".opencode/rules",
+      "rulesEnabled": false,
+      "skillDirs": ["~/.agents/skills"],
+      "notes": "opencode reads AGENTS.md. MCP config at .opencode/mcp.json. Hooks at .opencode/hooks.json. Skills from ~/.agents/skills (global, shared)."
+    },
+    "claude-code": {
+      "instructionsFile": "CLAUDE.md",
+      "mcpConfigPath": ".claude/settings.json",
+      "mcpConfigKey": "mcpServers",
+      "hooksConfigPath": ".claude/settings.json",
+      "hooksConfigFormat": "nested",
+      "rulesDir": ".claude/rules",
+      "rulesEnabled": false,
+      "skillDirs": ["~/.agents/skills", "~/.claude/skills"],
+      "notes": "Claude Code reads CLAUDE.md. MCP + hooks in .claude/settings.json. Skills from ~/.agents/skills and ~/.claude/skills."
+    },
+    "cursor": {
+      "instructionsFile": ".cursorrules",
+      "mcpConfigPath": ".cursor/mcp.json",
+      "mcpConfigKey": "mcpServers",
+      "hooksConfigPath": null,
+      "hooksConfigFormat": null,
+      "rulesDir": ".cursor/rules",
+      "rulesEnabled": true,
+      "skillDirs": ["~/.agents/skills"],
+      "notes": "Cursor reads .cursorrules and .cursor/rules/*.md. MCP config at .cursor/mcp.json. No hooks support. Skills from ~/.agents/skills (global)."
+    },
+    "windsurf": {
+      "instructionsFile": ".windsurf/rules",
+      "mcpConfigPath": ".windsurf/mcp_config.json",
+      "mcpConfigKey": "mcpServers",
+      "hooksConfigPath": null,
+      "hooksConfigFormat": null,
+      "rulesDir": ".windsurf/rules",
+      "rulesEnabled": true,
+      "skillDirs": ["~/.agents/skills", ".windsurf/skills"],
+      "notes": "Windsurf reads .windsurf/rules/*.md. MCP config at .windsurf/mcp_config.json. No hooks support. Skills from ~/.agents/skills and project .windsurf/skills."
+    },
+    "omp": {
+      "instructionsFile": "AGENTS.md",
+      "mcpConfigPath": ".omp/mcp.json",
+      "mcpConfigKey": "mcpServers",
+      "hooksConfigPath": null,
+      "hooksConfigFormat": null,
+      "rulesDir": ".omp/rules",
+      "rulesEnabled": true,
+      "skillDirs": ["~/.agents/skills", "~/.omp/agent/skills", ".omp/skills"],
+      "notes": "omp (oh-my-pi) reads AGENTS.md at project root (a .omp/AGENTS.md override takes priority). Project MCP at .omp/mcp.json (mcpServers key). No declarative hooks: omp hooks are trusted TS/JS modules under .omp/hooks/pre|post/ (executable code), so the kit writes no hooks config. Rules are written to .omp/rules/ (kit convention; omp's native sticky-rules file is .omp/RULES.md). Skills discovered one level deep at user ~/.omp/agent/skills and project .omp/skills; ~/.agents/skills is also a compatible location. Caveat: omp auto-imports MCP definitions from other agents' configs (Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Windsurf, VS Code, plugins) and the first definition found wins — an omp+claude-code project must not double-register servers."
+    }
+  }
+}

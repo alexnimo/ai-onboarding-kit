@@ -1,0 +1,50 @@
+# Engineering Rules — {{PROJECT_NAME}}
+
+<!-- Non-negotiable engineering rules. These are the guardrails that prevent regressions.
+     Fill guidance depends on project maturity:
+       - design-phase: Leave Invariants, Schema Rules, and Dependency Rules as TBD.
+         Do NOT invent rules for a stack that hasn't been chosen yet.
+       - early-stage: Fill what is enforced by existing code. TBD for the rest.
+       - mature: Full inference from codebase conventions, tests, and CI config. -->
+
+## Invariants
+
+<!-- Non-negotiable rules specific to this project (deployment order, schema rules, etc.).
+     TBD for design-phase projects — fill as invariants are discovered and enforced. -->
+
+{{INVARIANTS}}
+
+## Schema Rules
+
+<!-- Database schema conventions, if applicable.
+     Example: "schema.sql is the install target. Migrations are for live upgrades.
+     Both must be updated for every DB change."
+     If no database, state "N/A — this project has no database."
+     TBD for design-phase projects — fill when a database is chosen. -->
+
+{{SCHEMA_RULES}}
+
+## Dependency Management
+
+<!-- How are dependencies managed? What package manager? What rules?
+     Example: "Use only uv for Python packages. Never use pip directly.
+     Add new packages to pyproject.toml."
+     TBD for design-phase projects — fill when a package manager is chosen. -->
+
+- Package manager: {{PACKAGE_MANAGER}}
+- Install command: `{{INSTALL_COMMAND}}`
+
+{{DEPENDENCY_RULES}}
+
+## Canonical Doc Map
+
+| Concern | Location |
+|---|---|
+| System architecture | `.agents/SYSTEM.md` |
+| Architecture patterns | `.agents/ARCHITECTURE_PATTERNS.md` |
+| Bug fix history | `.agents/BUG_FIX_LOG.md` |
+| Dev workflow | `.agents/DEV_WORKFLOW.md` |
+| Product requirements | `.agents/PRD.md` |
+| API docs | `docs/` (or OpenAPI spec URL) |
+
+{{CANONICAL_DOC_MAP_EXTRA}}

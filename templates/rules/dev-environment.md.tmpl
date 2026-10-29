@@ -1,0 +1,26 @@
+# Dev Environment Rules
+
+<!-- This rule file is loaded by agents that support rule directories (e.g., Windsurf .windsurf/rules/, Cursor .cursor/rules/).
+     Devin reads AGENTS.md at the project root instead, but also imports from .windsurf/rules/ via read_config_from.windsurf.
+     Keep this file in sync with the dev workflow section of AGENTS.md.
+     Fill guidance depends on project maturity:
+       - design-phase: All values TBD. Do NOT invent commands or ports.
+       - early-stage: Fill from existing config. TBD for missing.
+       - mature: Full inference from config files and scripts. -->
+
+## Environment
+
+- Package manager: {{PACKAGE_MANAGER}}
+- Install: `{{INSTALL_COMMAND}}`
+- Dev server: `{{DEV_SERVER_COMMAND}}` on port {{DEV_PORT}}
+- Prod server: `{{PROD_SERVER_COMMAND}}` on port {{PROD_PORT}}
+- Tests: `{{TEST_COMMAND}}`
+- DB migrations: `{{DB_MIGRATION_COMMAND}}`
+
+## Dev / Prod Safety
+
+{{DEV_PROD_SAFETY}}
+
+## Server Restart
+
+{{SERVER_RESTART_NOTES}}

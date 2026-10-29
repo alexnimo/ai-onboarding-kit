@@ -1,0 +1,25 @@
+# Personal state — never commit (holds private profiles, project paths, secrets)
+profiles.user.json
+projects.registry.json
+projects.registry.json.lock
+
+# Local reference copies and personal tooling — never commit
+omp-src/
+.agents/
+.worktrees/
+tasks/
+.devin/
+
+# Factory/session evidence artifacts
+.qa-report.md
+.qa-artifacts/
+.factory-findings-*
+.factory-result-*
+.devin-progress.md
+.devin-report.md
+test-out.txt
+test-out-*.txt
+rest*.txt
+nul
+
+*.tmp

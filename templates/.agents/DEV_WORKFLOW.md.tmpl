@@ -1,0 +1,53 @@
+# Dev Workflow — {{PROJECT_NAME}}
+
+<!-- How to set up and work in the development environment.
+     Fill guidance depends on project maturity:
+       - design-phase: Leave Environment Setup, Dev/Prod Safety, and Server Restart as TBD.
+         Commands and ports will be filled when the stack is chosen and the dev environment is set up.
+       - early-stage: Fill commands and ports from existing config. TBD for safety/restart notes.
+       - mature: Full inference from config files, scripts, and existing documentation. -->
+
+## Environment Setup
+
+<!-- Step-by-step instructions to get the dev environment running from a fresh clone.
+     TBD for design-phase projects — fill when the dev environment is set up. -->
+
+{{ENV_SETUP}}
+
+## Commands
+
+| Action | Command |
+|---|---|
+| Install dependencies | `{{INSTALL_COMMAND}}` |
+| Run dev server | `{{DEV_SERVER_COMMAND}}` |
+| Run prod server | `{{PROD_SERVER_COMMAND}}` |
+| Run tests | `{{TEST_COMMAND}}` |
+| Run DB migrations | `{{DB_MIGRATION_COMMAND}}` |
+
+## Port Assignments
+
+<!-- What ports does the project use? List dev, prod, and any other services.
+     TBD for design-phase projects — fill when ports are configured. -->
+
+- Dev server: `{{DEV_PORT}}`
+- Prod server: `{{PROD_PORT}}`
+
+{{PORT_ASSIGNMENTS_EXTRA}}
+
+## Dev / Prod Safety
+
+<!-- Rules for working with dev vs prod environments.
+     Example: "Do NOT kill or restart the prod server unless confirmed stopped."
+     Example: "The Vite dev server proxies /api/* to the prod backend by default."
+     TBD for design-phase projects — fill when dev/prod environments exist. -->
+
+{{DEV_PROD_SAFETY}}
+
+## Server Restart Notes
+
+<!-- Does the dev server hot-reload reliably? If not, document when a manual restart is needed.
+     Example: "uvicorn --reload on Windows does NOT reliably pick up new routers/modules.
+     After structural changes, restart the server manually."
+     TBD for design-phase projects — fill when a dev server is running. -->
+
+{{SERVER_RESTART_NOTES}}

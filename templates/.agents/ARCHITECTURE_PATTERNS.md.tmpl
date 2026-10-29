@@ -1,0 +1,52 @@
+# Architecture Patterns — {{PROJECT_NAME}}
+
+<!-- This file lists the canonical patterns this project follows.
+     New features MUST follow these patterns. If a pattern doesn't exist yet,
+     add it here after establishing it, so future work doesn't diverge.
+     Fill guidance depends on project maturity:
+       - design-phase: Leave all sections as TBD. Patterns don't exist yet.
+         Do NOT invent patterns for code that doesn't exist.
+       - early-stage: Document patterns that are clearly established in the code.
+         TBD for patterns that are still emerging.
+       - mature: Full inference from codebase. Document all established patterns. -->
+
+## Canonical Patterns
+
+<!-- List the architectural patterns this project follows (async patterns, caching,
+     event flow, error handling, etc.).
+     TBD for design-phase projects — fill as patterns are established in code. -->
+
+{{CANONICAL_PATTERNS}}
+
+## Consistency Checklist
+
+<!-- Before implementing a feature, verify it follows these invariants.
+     Derive from the canonical patterns above.
+     TBD for design-phase projects — fill as patterns are documented. -->
+
+{{CONSISTENCY_CHECKLIST}}
+
+## Async / Concurrency Rules
+
+<!-- If the project uses async or concurrency, document the rules here.
+     Example: "All blocking I/O calls must be offloaded via asyncio.to_thread() / worker pool."
+     If the project has no async, state "N/A — this project is synchronous."
+     TBD for design-phase projects — fill when async/concurrency is implemented. -->
+
+{{ASYNC_RULES}}
+
+## Error Handling Patterns
+
+<!-- How does the project handle errors? Exceptions, result types, error codes?
+     What are the boundaries where errors are caught vs propagated?
+     TBD for design-phase projects — fill when error handling is implemented. -->
+
+{{ERROR_HANDLING_PATTERNS}}
+
+## Testing Patterns
+
+<!-- What testing framework is used? Where do tests live? What patterns do tests follow?
+     Example: "Tests in /tests mirror the source structure. Use pytest fixtures for setup."
+     TBD for design-phase projects — fill when testing infrastructure is set up. -->
+
+{{TESTING_PATTERNS}}

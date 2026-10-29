@@ -1,0 +1,22 @@
+# Coding Standards
+
+<!-- Project-specific coding standards. Loaded by agents that support rule directories.
+     Keep in sync with the Core Principals section of AGENTS.md. -->
+
+## Style
+
+- Follow existing code style in the project. Do not reformat adjacent code.
+- Write docstrings/comments for non-obvious code. Add inline `# Reason:` comments for complex logic.
+- Never hardcode values that could change. Use environment variables managed via .env.
+
+## Structure
+
+- No file longer than 500 lines. Refactor by splitting into modules if approaching this limit.
+- Organize code into clearly separated modules, grouped by feature or responsibility.
+- Use clear, consistent imports (prefer relative imports within packages).
+
+## Principles
+
+- Simplicity First: Minimum code that solves the problem. Nothing speculative.
+- Surgical Changes: Touch only what you must. Clean up only your own mess.
+- Goal-Driven Execution: Define success criteria. Loop until verified.
