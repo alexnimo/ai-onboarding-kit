@@ -32,7 +32,7 @@ git commit -am "feat: ..."
 git -C ../aok-stable merge --ff-only main
 
 # 3. Publish the same commit publicly (optional, independent step)
-git push public main
+git push origin main
 ```
 
 Why this is safe:
