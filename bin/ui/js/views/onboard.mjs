@@ -83,18 +83,24 @@ export function renderOnboard(planId) {
         el('span', { class: `badge badge-${toneOf(action)}` },
           `${ACTION_LABEL[action] ?? action}: ${n}`)))));
 
-    // Runner picker for resolve rows.
+    // Runner picker: which harness performs agent-assisted merges (the
+    // "bootstrap" consolidation step). Options show live PATH availability;
+    // if none are installed, merges still work — the Resolve button hides.
     if (state.agents.length) {
       const select = el('select', {
-        'aria-label': 'Runner for agent-assisted resolution',
+        'aria-label': 'Bootstrap agent for agent-assisted merges',
         dataset: { key: 'runner' },
         onchange: e => { state.runner = e.target.value; },
       }, state.agents.map(a => el('option', {
         value: a.name,
         selected: a.name === state.runner,
         disabled: !a.available,
-      }, `${a.name}${a.available ? '' : ' (not found)'}`)));
-      nodes.push(el('p', {}, 'Resolve with: ', select));
+      }, `${a.name}${a.available ? ` (${a.binary} on PATH)` : ' (not found on PATH)'}`)));
+      nodes.push(el('p', {},
+        'Bootstrap agent (runs agent-assisted merges): ', select,
+        state.agents.every(a => !a.available)
+          ? el('span', { class: 'warn' }, ' — none detected on PATH; merges apply directly without agent consolidation')
+          : null));
     }
 
     const globals = rows.filter(r => r.global);

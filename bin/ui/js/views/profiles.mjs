@@ -224,7 +224,11 @@ export function renderProfiles() {
       const res = await api.profileSync(id, state.project || undefined);
       const cur = state.plans[id] || {};
       state.plans[id] = { ...cur, results: res.results, skills: res.skills };
-      toast(`Synced profile '${id}'`);
+      const wrote = res.results.filter(r => !String(r.action).includes('skip'));
+      toast(`Synced '${id}': ${wrote.length} written, `
+        + `${res.results.length - wrote.length} already up to date`
+        + (wrote.length ? ` — ${wrote.slice(0, 3).map(r => r.dest).join(', ')}`
+          + (wrote.length > 3 ? ` +${wrote.length - 3} more` : '') : ''));
     } catch (err) {
       toast(`Sync failed: ${err.message}`, 'error');
     }
