@@ -490,7 +490,10 @@ const ALIAS_BLOCK_END = '# <<< ai-onboarding-kit profile aliases <<<';
 export function ensureAliasBlock({ home = os.homedir() } = {}) {
   const results = [];
 
-  // POSIX: source every .sh in the alias dir.
+  // POSIX shells: bash login reads .bash_profile > .bash_login > .profile;
+  // interactive non-login reads .bashrc; zsh reads .zshrc. Ensure the block
+  // in every existing rc file; if none exist, create .bashrc + .bash_profile
+  // so the aliases work regardless of shell/login mode.
   const posixBlock = [
     ALIAS_BLOCK_BEGIN,
     `for f in "$HOME/.ai-onboarding-kit/aliases/"*.sh; do`,
@@ -498,16 +501,26 @@ export function ensureAliasBlock({ home = os.homedir() } = {}) {
     `done`,
     ALIAS_BLOCK_END,
   ].join('\n');
-  for (const name of ['.bashrc', '.zshrc', '.profile']) {
+  const posixNames = ['.bashrc', '.bash_profile', '.zshrc', '.profile'];
+  let wrotePosix = false;
+  for (const name of posixNames) {
     const rc = path.join(home, name);
     if (!fs.existsSync(rc)) continue;
     const cur = fs.readFileSync(rc, 'utf8');
     if (cur.includes(ALIAS_BLOCK_BEGIN)) {
       results.push({ dest: `~/${name}`, action: 'exists-skip' });
+      wrotePosix = true;
       continue;
     }
     fs.writeFileSync(rc, cur.replace(/\s*$/, '\n') + posixBlock + '\n');
     results.push({ dest: `~/${name}`, action: 'appended' });
+    wrotePosix = true;
+  }
+  if (!wrotePosix) {
+    for (const name of ['.bashrc', '.bash_profile']) {
+      fs.writeFileSync(path.join(home, name), posixBlock + '\n');
+      results.push({ dest: `~/${name}`, action: 'created' });
+    }
   }
 
   // PowerShell: dot-source every .ps1 in the alias dir (PS5+PS7 locations).
@@ -521,8 +534,6 @@ export function ensureAliasBlock({ home = os.homedir() } = {}) {
     path.join(home, 'Documents', 'WindowsPowerShell', 'Microsoft.PowerShell_profile.ps1'),
   ] : [];
   for (const rc of psTargets) {
-    const parent = path.dirname(rc);
-    if (!fs.existsSync(parent)) continue; // don't create PS dirs for nothing
     if (fs.existsSync(rc)) {
       const cur = fs.readFileSync(rc, 'utf8');
       if (cur.includes(ALIAS_BLOCK_BEGIN)) {
@@ -532,6 +543,7 @@ export function ensureAliasBlock({ home = os.homedir() } = {}) {
       fs.writeFileSync(rc, cur.replace(/\s*$/, '\n') + psBlock + '\n');
       results.push({ dest: rc, action: 'appended' });
     } else {
+      fs.mkdirSync(path.dirname(rc), { recursive: true });
       fs.writeFileSync(rc, psBlock + '\n');
       results.push({ dest: rc, action: 'created' });
     }
