@@ -22,7 +22,7 @@ import { readJson, resolveManifestPath } from './common.mjs';
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min for a resolve step
 
-function which(binary) {
+export function which(binary) {
   const cmd = process.platform === 'win32' ? 'where' : 'which';
   try {
     execFileSync(cmd, [binary], { stdio: 'pipe' });

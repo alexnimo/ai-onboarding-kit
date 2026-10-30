@@ -163,11 +163,38 @@ async function removeProject(p) {
 }
 
 function registerForm() {
+  // Bootstrap agents: fetched live, PATH availability shown.
+  const runners = [];
+  const agentsFieldset = el('fieldset', {},
+    el('legend', {}, 'Bootstrap agents (harnesses)'),
+    el('p', { class: 'muted' }, 'Loading agent detection...'));
+  api.onboardAgents().then(r => {
+    runners.push(...(r.harnesses || r.agents || []));
+    agentsFieldset.replaceChildren(
+      el('legend', {}, 'Bootstrap agents (harnesses)'),
+      ...(runners.length
+        ? runners.map(r => el('label', { class: 'chip-check' },
+            el('input', {
+              type: 'checkbox', name: 'agents', value: r.name,
+              checked: r.available,
+              disabled: !r.available,
+            }),
+            ` ${r.name} `,
+            el('span', { class: 'hint' },
+              (r.available ? `(${r.binary} on PATH)` : `(${r.binary} not found)`)
+              + (r.specialist ? ' · profiles supported' : ''))))
+        : [el('p', { class: 'muted' }, 'No agents detected — check PATH')]));
+  }).catch(() => {
+    agentsFieldset.replaceChildren(
+      el('legend', {}, 'Bootstrap agents (harnesses)'),
+      el('p', { class: 'muted' }, 'Agent detection unavailable'));
+  });
+
   async function submit(e) {
     e.preventDefault();
     const form = e.target;
-    const agents = form.elements.agents.value
-      .split(',').map(s => s.trim()).filter(Boolean);
+    const agents = [...form.querySelectorAll('input[name="agents"]:checked')]
+      .map(b => b.value);
     try {
       const res = await api.projectCreate({
         name: form.elements.name.value.trim(),
@@ -190,12 +217,7 @@ function registerForm() {
       ' ',
       el('label', {}, 'Name ',
         el('input', { name: 'name', placeholder: 'defaults to directory name' }))),
+    agentsFieldset,
     el('p', {},
-      el('label', {}, 'Agents ',
-        el('input', {
-          name: 'agents', size: '40',
-          placeholder: 'comma-separated, e.g. opencode, claude',
-        })),
-      ' ',
       el('button', { type: 'submit', class: 'button primary' }, 'Register')));
 }

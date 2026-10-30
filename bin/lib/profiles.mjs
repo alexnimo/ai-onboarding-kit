@@ -187,6 +187,22 @@ function emitForHarness({ profile, spec, mcpEntries, servers, artifacts, project
         absPath: at(`${dir}/AGENTS.md`, 'user'),
         content: renderProfileInstructions(profile, 'omp'),
       });
+      // Shell alias (opt-in via profile.alias): a sourceable snippet the
+      // user adds once to .bashrc/.zshrc or their PS profile.
+      if (profile.alias) {
+        const shDest = `~/.ai-onboarding-kit/aliases/${id}.sh`;
+        artifacts.push({
+          harness: 'omp', scope: 'user', dest: shDest,
+          absPath: at(shDest, 'user'),
+          content: `# alias for omp profile '${id}' — source this file or copy the line\nalias ${profile.alias}='omp --profile ${id}'\n`,
+        });
+        const psDest = `~/.ai-onboarding-kit/aliases/${id}.ps1`;
+        artifacts.push({
+          harness: 'omp', scope: 'user', dest: psDest,
+          absPath: at(psDest, 'user'),
+          content: `# alias for omp profile '${id}' — dot-source this file or copy the lines\nfunction ${profile.alias} { omp --profile ${id} @args }\n`,
+        });
+      }
       break;
     }
     case 'agents+json': { // opencode

@@ -170,6 +170,16 @@
 
   "profiles": [
     {
+      "id": "default",
+      "label": "Default (core)",
+      "description": "Core coding profile: required skills minus the UX/UI stack (ui-design-orchestrator, design skills stay out) and NO specialist MCP servers — only core-tier servers (semble, code-review-graph). Use for day-to-day implementation work where browser/design tooling is not wanted in context.",
+      "skills": ["brainstorming", "grill-me", "grill-with-docs", "spec-driven-development", "planning-and-task-breakdown", "test-driven-development", "code-review-and-quality", "debugging-and-error-recovery", "diagnosing-bugs", "using-git-worktrees", "handoff", "documentation-and-adrs", "find-skills", "full-output-enforcement", "excalidraw-diagram-generator", "api-and-interface-design", "security-and-hardening", "performance-optimization", "observability-and-instrumentation", "improve-codebase-architecture"],
+      "cliTools": [],
+      "mcpServers": [],
+      "harnesses": ["omp"],
+      "origin": "kit"
+    },
+    {
       "id": "design",
       "label": "Design orchestration",
       "description": "Designer skills + browser MCP for explore lanes, redesigns, audits. ui-design-orchestrator stays core-only — invoke it explicitly when needed; it is not loaded here.",

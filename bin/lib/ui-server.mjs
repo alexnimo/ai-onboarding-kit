@@ -49,7 +49,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   STATE_REL_PATH,
@@ -76,7 +76,7 @@ import { getKitCommit } from './common.mjs';
 import { dryRun, mergeFile, applyDisposition } from './sync-engine.mjs';
 
 import { buildOnboardRows, mergeFactRows } from './onboard-plan.mjs';
-import { listRunners, spawnRunner } from './agent-spawn.mjs';
+import { listRunners, spawnRunner, which } from './agent-spawn.mjs';
 export const UI_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)), '..', 'ui');
 
@@ -108,7 +108,7 @@ const PLAN_TTL_MS = 30 * 60 * 1000;
 const PROFILE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 // Fields the UI/PUT routes may write onto user profiles or kit overrides.
 const PROFILE_EDITABLE = ['label', 'description', 'skills', 'cliTools',
-  'mcpServers', 'harnesses'];
+  'mcpServers', 'harnesses', 'alias', 'disabled'];
 const PROFILE_LIST_FIELDS = ['skills', 'cliTools', 'mcpServers', 'harnesses'];
 
 /** Error carrying an HTTP status; anything else becomes a bare 500. */
@@ -435,9 +435,16 @@ export function createUiServer(opts = {}) {
           throw httpError(400, `${key} must be an array of strings`);
         }
         fields[key] = [...new Set(body[key])];
+      } else if (key === 'disabled') {
+        fields[key] = body[key] === true;
       } else {
         if (typeof body[key] !== 'string') {
           throw httpError(400, `${key} must be a string`);
+        }
+        if (key === 'alias' && body[key]
+            && !/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(body[key])) {
+          throw httpError(400,
+            'alias must be a shell-safe name (letters, digits, -, _)');
         }
         fields[key] = body[key];
       }
@@ -789,6 +796,7 @@ export function createUiServer(opts = {}) {
         cliTools: fields.cliTools ?? [],
         mcpServers: fields.mcpServers ?? [],
         harnesses: fields.harnesses ?? ['omp'],
+        ...(fields.alias ? { alias: fields.alias } : {}),
       };
       state.profiles[id] = profile;
       saveProfilesState(state);
@@ -957,19 +965,36 @@ export function createUiServer(opts = {}) {
       if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9-_]*$/i.test(name)) {
         throw httpError(400, 'name must be letters/digits/dash/underscore');
       }
+      const src = typeof source === 'string' ? source.trim() : '';
+      if (src && !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(src)) {
+        throw httpError(400, "source must look like 'owner/repo'");
+      }
       if ((manifest.skills || []).some(s => s.name === name)
           || state.custom.skills.some(s => s.name === name)) {
         throw httpError(409, `skill '${name}' already in catalog`);
       }
+      // Best-effort reachability check: does the source repo exist?
+      const check = { ok: null, detail: 'no source given — repo check skipped' };
+      if (src) {
+        const probe = spawnSync('git',
+          ['ls-remote', '--exit-code', `https://github.com/${src}.git`, 'HEAD'],
+          { timeout: 15000, encoding: 'utf8' });
+        check.ok = !probe.error && probe.status === 0;
+        check.detail = probe.error
+          ? `git ls-remote failed: ${probe.error.message}`
+          : probe.status === 0
+            ? `github.com/${src} reachable`
+            : `github.com/${src} not reachable (exit ${probe.status})`;
+      }
       const entry = {
         name,
-        source: typeof source === 'string' ? source : '',
-        skill: typeof skill === 'string' ? skill : name,
+        source: src,
+        skill: typeof skill === 'string' && skill.trim() ? skill.trim() : name,
         category: typeof body.category === 'string' ? body.category : 'custom',
       };
       state.custom.skills.push(entry);
       saveProfilesState(state);
-      sendJson(res, 201, { skill: entry });
+      sendJson(res, 201, { skill: entry, check });
       return;
     }
 
@@ -1004,9 +1029,14 @@ export function createUiServer(opts = {}) {
             : {},
         },
       };
+      // Sanity check: is the launch command on PATH?
+      const check = { ok: which(command.trim().split(/\s+/)[0]),
+        detail: which(command.trim().split(/\s+/)[0])
+          ? `'${command.trim()}' found on PATH`
+          : `'${command.trim()}' NOT on PATH on this machine — profile destinations will still be written, but the server may not launch here` };
       state.custom.mcpServers.push(entry);
       saveProfilesState(state);
-      sendJson(res, 201, { mcpServer: entry });
+      sendJson(res, 201, { mcpServer: entry, check });
       return;
     }
 
@@ -1190,9 +1220,19 @@ export function createUiServer(opts = {}) {
       return;
     }
 
-    // GET /api/onboard/agents - runner table for the view's --agent picker.
+    // GET /api/onboard/agents - runner table for the view's --agent picker
+    // plus bootstrap harnesses (agentProfiles) with PATH detection.
     if (method === 'GET' && pathname === '/api/onboard/agents') {
-      sendJson(res, 200, { agents: listRunners() });
+      const manifest = loadManifest();
+      const harnesses = Object.keys(manifest.agentProfiles || {}).map(name => {
+        // Same-name runner binary detects the harness CLI (devin->devin,
+        // omp->omp, claude-code->claude, cursor->cursor-agent, etc.).
+        const runner = manifest.onboardingAgents?.[name];
+        const binary = runner?.detect ?? name;
+        return { name, binary, available: which(binary),
+          specialist: !!manifest.agentProfiles[name]?.specialist };
+      });
+      sendJson(res, 200, { agents: listRunners(), harnesses });
       return;
     }
 

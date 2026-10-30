@@ -91,8 +91,8 @@ export function renderOnboard(planId) {
         onchange: e => { state.runner = e.target.value; },
       }, state.agents.map(a => el('option', {
         value: a.name,
-        selected: String(a.name === state.runner),
-        disabled: String(!a.available),
+        selected: a.name === state.runner,
+        disabled: !a.available,
       }, `${a.name}${a.available ? '' : ' (not found)'}`)));
       nodes.push(el('p', {}, 'Resolve with: ', select));
     }

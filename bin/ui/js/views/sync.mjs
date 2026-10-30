@@ -14,7 +14,7 @@ import {
   countByAction, resultCounts, describeLastResult,
 } from '../model.mjs';
 
-const DISP_LABELS = [['accepted', 'Use merged'], ['reverted', 'Keep mine'], ['kit', 'Use kit']];
+const DISP_LABELS = [['accepted', 'Write merged'], ['reverted', 'Keep project'], ['kit', 'Overwrite with kit']];
 const ACTION_LABEL = {
   'fast-forward': 'Fast-forward', merged: 'Merged', conflict: 'Conflict',
   skip: 'Skip', retired: 'Retired',
@@ -56,7 +56,7 @@ export function renderSync(projectPath) {
         el('button', { type: 'button', class: 'button', onclick: () => dryRun() }, 'Re-run dry run'),
         el('a', { class: 'button', href: `#/history?path=${encodeURIComponent(projectPath)}` }, 'History'),
         el('a', { class: 'button', href: '#/' }, 'All projects'))),
-    el('p', { class: 'muted' }, 'Dry run only. Nothing is written until you press Apply.'),
+    el('p', { class: 'muted' }, 'Preview (dry run): the table shows live diffs between the kit and your project as of the last run. Nothing is written until you press "Apply — write changes".'),
     banner,
     body);
 
@@ -131,9 +131,9 @@ export function renderSync(projectPath) {
     if (state.files.length) {
       nodes.push(el('div', { class: 'disp-legend' },
         el('strong', {}, 'Dispositions: '),
-        el('span', {}, 'Use merged', ' = write the merged result (may contain conflict markers you must resolve). '),
-        el('span', {}, 'Keep mine', ' = keep the project file as-is. '),
-        el('span', {}, 'Use kit', " = overwrite with the kit's version.")));
+        el('span', {}, 'Write merged', ' = write the merged result (may contain conflict markers you must resolve). '),
+        el('span', {}, 'Keep project', ' = keep the project file exactly as it is — kit version not written. '),
+        el('span', {}, 'Overwrite with kit', " = replace the project file with the kit's version.")));
     }
 
     if (state.files.length) {
@@ -150,13 +150,13 @@ export function renderSync(projectPath) {
     const tally = tallyDispositions(state.files, state.disp);
     nodes.push(el('div', { class: 'apply-bar' },
       el('p', { class: 'tally', role: 'status' },
-        `Use merged ${tally.accepted} · Keep mine ${tally.reverted} · Use kit ${tally.kit} of ${tally.total} file(s)`),
+        `Write merged ${tally.accepted} · Keep project ${tally.reverted} · Overwrite with kit ${tally.kit} of ${tally.total} file(s)`),
       el('button', {
         type: 'button', class: 'button primary',
         'aria-disabled': String(!gate.ok || state.busy),
         dataset: { key: 'apply' },
         onclick: apply,
-      }, state.busy ? 'Applying...' : 'Apply')));
+      }, state.busy ? 'Applying...' : 'Apply — write changes')));
 
     body.replaceChildren(...nodes);
     if (state.focusKey) {
@@ -352,7 +352,7 @@ export function renderSync(projectPath) {
     return el('div', { class: `toast toast-${failures.length ? 'error' : 'ok'}`, role: 'status' },
       el('div', {},
         el('p', {},
-          `Applied: ${counts.accepted} use merged, ${counts.reverted} keep mine, ${counts.kit} use kit`
+          `Applied: ${counts.accepted} write merged, ${counts.reverted} keep project, ${counts.kit} overwrite with kit`
           + (counts.failed ? `, ${counts.failed} failed` : '') + '.'),
         failures.length
           ? el('ul', {}, failures.map(f => el('li', {}, `${f.dest}: ${f.error}`)))

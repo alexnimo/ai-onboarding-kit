@@ -141,9 +141,9 @@ export function renderProfiles() {
             name: 'project',
             onchange: e => { state.project = e.target.value; },
           },
-            el('option', { value: '', selected: String(!state.project) }, 'Kit home (default)'),
+            el('option', { value: '', selected: !state.project }, 'Kit home (default)'),
             state.projects.map(p => el('option', {
-              value: p.path, selected: String(state.project === p.path),
+              value: p.path, selected: state.project === p.path,
             }, `${p.name || p.path}`)))),
         ' ',
         el('span', { class: 'hint' }, 'plan and sync target this project')),
@@ -253,6 +253,7 @@ export function renderProfiles() {
     const form = body.querySelector('form');
     form.elements.label.value = p.label || '';
     form.elements.description.value = p.description || '';
+    if (form.elements.alias) form.elements.alias.value = p.alias || '';
     for (const name of ['skills', 'cliTools', 'mcpServers', 'harnesses']) {
       const values = new Set(
         name === 'skills'
@@ -291,6 +292,7 @@ export function renderProfiles() {
         mcpServers: [...form.querySelectorAll('input[name="mcpServers"]:checked')]
           .map(b => b.value),
         harnesses: harnesses.checked(),
+        alias: form.elements.alias?.value.trim() || '',
       };
       try {
         if (state.editing) {
@@ -418,7 +420,7 @@ export function renderProfiles() {
     const idInput = el('input', {
       name: 'id', required: true, pattern: '[a-z0-9][a-z0-9-]*',
       placeholder: 'my-specialist',
-      disabled: String(editing && state.editingOrigin === 'kit'),
+      disabled: !!(editing && state.editingOrigin === 'kit'),
       value: editing || '',
       oninput: () => { idTouched = true; },
     });
@@ -437,6 +439,15 @@ export function renderProfiles() {
         ' ',
         el('label', {}, 'Description ',
           el('input', { name: 'description', size: '40' }))),
+      el('p', {},
+        el('label', {}, 'Shell alias ',
+          el('input', {
+            name: 'alias', size: '14', pattern: '[a-zA-Z][a-zA-Z0-9_-]*',
+            placeholder: 'e.g. o-qa (omp profiles only)',
+          })),
+        ' ',
+        el('span', { class: 'hint' },
+          'opt-in: sync writes ~/.ai-onboarding-kit/aliases/<id>.sh|.ps1 (alias to omp --profile <id>); delete removes them')),
       el('fieldset', {},
         el('legend', {}, 'Skills'),
         skills.nodes.length ? skills.nodes : el('p', { class: 'muted' }, 'None in catalog'),
