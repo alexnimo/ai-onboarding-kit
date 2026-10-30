@@ -9,9 +9,11 @@
  */
 
 /** Actions that carry a disposition; skip/retired rows are informational. */
-export const ACTIONABLE = new Set(['fast-forward', 'merged', 'conflict']);
+export const ACTIONABLE = new Set(['fast-forward', 'merged', 'conflict', 'injected', 'migrated',
+  'create', 'inject-region', 'merge-keys', 'append-import', 'register',
+  'install-skill', 'update-skill', 'copy-skill']);
 
-const SEVERITY = { conflict: 4, merged: 3, 'fast-forward': 2, retired: 1, skip: 0 };
+const SEVERITY = { conflict: 4, merged: 3, 'inject-region': 3, 'merge-keys': 3, 'fast-forward': 2, create: 2, injected: 2, migrated: 2, 'append-import': 2, 'install-skill': 2, 'update-skill': 2, 'copy-skill': 2, register: 1, retired: 1, 'region-removed': 1, 'missing-skill': 1, 'exists-skip': 0, skip: 0 };
 
 /** @param {string} artifact Plan row artifact. @returns {string} dest. */
 export function destOf(artifact) {
@@ -186,12 +188,17 @@ export function describeLastResult(res) {
 
 /**
  * Hash route -> view. Unknown or incomplete routes fall back to dashboard.
- *   #/                        dashboard
+ *   #/                        overview dashboard + doctor
  *   #/sync?path=<project>     dry-run classify + apply
  *   #/history?path=<project>  past syncs
+ *   #/project?path=<project>  project detail (agents, MCP, skills, profiles)
+ *   #/profiles                specialist profile management
+ *   #/skills                  skill/CLI/MCP catalog + install
  *
  * @param {string} hash location.hash
- * @returns {{name: 'dashboard'}|{name: 'sync'|'history', path: string}}
+ * @returns {{name: 'dashboard'|'profiles'|'skills'}
+ *   |{name: 'sync'|'history'|'project', path: string}
+ *   |{name: 'onboard', plan: string}}
  */
 export function parseRoute(hash) {
   const raw = String(hash || '').replace(/^#/, '');
@@ -199,8 +206,13 @@ export function parseRoute(hash) {
   const seg = (qi === -1 ? raw : raw.slice(0, qi)).replace(/^\/+|\/+$/g, '');
   const params = new URLSearchParams(qi === -1 ? '' : raw.slice(qi + 1));
   const project = params.get('path');
-  if ((seg === 'sync' || seg === 'history') && project) {
+  if (seg === 'profiles') return { name: 'profiles' };
+  if (seg === 'skills') return { name: 'skills' };
+  if ((seg === 'sync' || seg === 'history' || seg === 'project') && project) {
     return { name: seg, path: project };
+  }
+  if (seg === 'onboard' && params.get('plan')) {
+    return { name: 'onboard', plan: params.get('plan') };
   }
   return { name: 'dashboard' };
 }

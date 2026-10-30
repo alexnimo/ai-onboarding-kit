@@ -1,8 +1,8 @@
-# Devin Scaffold Prompt
+# Scaffold Prompt
 
-> Paste this into Devin (or any AI agent) running in the project you want to onboard.
+> Paste this into any AI coding agent runner running in the project you want to onboard.
 > The agent will run the scaffold script, install missing skills, merge MCP/hooks/rules config.
-> It will NOT fill placeholders — use `prompts/devin-fill-placeholders.md` for that after the scaffold completes.
+> It will NOT fill placeholders — use `prompts/onboard-fill.md` for that after the scaffold completes.
 >
 > Assumption: the current working directory is the TARGET project (the one being onboarded).
 > You must provide KIT_PATH below — the path to the ai-onboarding-kit directory on your machine.
@@ -19,13 +19,15 @@ You are scaffolding a project for AI-agent-optimized development. The current wo
 - **TARGET**: The current working directory. Do not change directories.
 - **AGENT**: Which agent profile to use. Default: `devin`. Options: `devin`, `hermes`, `opencode`, `claude-code`, `cursor`, `windsurf`.
 
-### Step 0 - Detect existing onboarding (config-only mode)
+### Step 0 - Detect existing onboarding
 
-If TARGET already has an `AGENTS.md` (or the agent profile's instructions file) AND a `.agents/` directory with content, this is a **re-onboarding** or **additional agent** scenario:
+Classify the target's instructions state:
 
-- Use **config-only mode**: run the scaffold with `--config-only` to skip templates and only configure skills + MCP for the target agent.
-- Do NOT overwrite the existing `AGENTS.md` or `.agents/` files.
-- Skip to Step 2 with the `--config-only` flag.
+| State | Path |
+|---|---|
+| `AGENTS.md` contains `<!-- BEGIN ai-onboarding-kit:kit-region -->` AND `.agents/` has content | **Re-onboarding / additional agent** → `--config-only`; do NOT overwrite `AGENTS.md` or `.agents/` |
+| `AGENTS.md` exists WITHOUT kit markers | **Foreign project** → full scaffold; the scaffold injects the kit region after the first heading (only inserted lines; content stays project-owned) |
+| No `AGENTS.md` | **New project** → full scaffold |
 
 ### Step 1 - Run the scaffold script
 
@@ -108,7 +110,7 @@ Print a summary of:
 
 Tell the user:
 1. The scaffold is complete but files contain `{{placeholders}}` that need to be filled.
-2. To fill them, paste the `prompts/devin-fill-placeholders.md` prompt into a new Devin session in this project directory.
+2. To fill them, paste the `prompts/onboard-fill.md` prompt into a new agent session in this project directory.
 3. Or fill them manually using the placeholder hints in `onboard.manifest.json`.
 
 ### Step 6 - Commit (optional)

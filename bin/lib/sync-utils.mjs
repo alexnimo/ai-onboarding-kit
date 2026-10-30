@@ -20,6 +20,89 @@ export const PLACEHOLDER_RE = /\{\{[A-Z_]+\}\}/g;
 export const NPX_TIMEOUT_MS = 120_000;
 // Args passed to npx come from the manifest; forbid shell metachars outright.
 const NPX_ARG_RE = /^[A-Za-z0-9@._~\/#+:=-]+$/;
+export const REGION_MARKER = (id) => ({
+  begin: `<!-- BEGIN ai-onboarding-kit:${id} -->`,
+  end: `<!-- END ai-onboarding-kit:${id} -->`,
+});
+
+/**
+ * Extract the region between BEGIN/END marker lines for `id`.
+ *
+ * @param {string} text File text.
+ * @param {string} id Region id (e.g. 'kit-region').
+ * @returns {string|null} Lines strictly between markers, or null when
+ *   either marker is absent or they appear out of order.
+ */
+export function extractRegion(text, id) {
+  const { begin, end } = REGION_MARKER(id);
+  const lines = String(text).split('\n');
+  const bi = lines.indexOf(begin);
+  const ei = lines.indexOf(end);
+  if (bi === -1 || ei === -1 || ei <= bi) return null;
+  return lines.slice(bi + 1, ei).join('\n');
+}
+
+/**
+ * Replace the region between markers with `regionText`; the markers and
+ * everything outside them are preserved byte-for-byte. Returns null when
+ * markers are absent/misordered (caller treats as inject/removed case).
+ *
+ * @param {string} text File text.
+ * @param {string} id Region id.
+ * @param {string} regionText New region content (no markers).
+ * @returns {string|null}
+ */
+export function spliceRegion(text, id, regionText) {
+  const { begin, end } = REGION_MARKER(id);
+  const lines = String(text).split('\n');
+  const bi = lines.indexOf(begin);
+  const ei = lines.indexOf(end);
+  if (bi === -1 || ei === -1 || ei <= bi) return null;
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const before = lines.slice(0, bi + 1).join(eol);
+  const after = lines.slice(ei).join(eol);
+  return `${before}${eol}${regionText}${eol}${after}`;
+}
+
+/**
+ * Inject a marker-wrapped region into a file that has none. Anchor: the
+ * line after the first `# ` heading and its following blank line; falls
+ * back to the file head when no heading exists. Deterministic so adopt,
+ * record-state, and onboard produce identical layouts.
+ *
+ * @param {string} text File text (may be '').
+ * @param {string} id Region id.
+ * @param {string} regionText Region content (no markers).
+ * @returns {string}
+ */
+export function injectRegion(text, id, regionText) {
+  const { begin, end } = REGION_MARKER(id);
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const block = `${begin}${eol}${regionText}${eol}${end}`;
+  if (!text) return `${block}${eol}`;
+  const lines = String(text).split('\n');
+  const hi = lines.findIndex(l => /^#\s/.test(l));
+  if (hi === -1) return `${block}${eol}${eol}${text}`;
+  let at = hi + 1;
+  while (at < lines.length && lines[at].trim() === '') at++;
+  const before = lines.slice(0, at).join(eol);
+  const after = lines.slice(at).join(eol);
+  return `${before}${eol}${block}${eol}${eol}${after}`;
+}
+
+/**
+ * True when `key` looks like a region artifact key (`<dest>:<id>`).
+ * Region ids and dests never contain ':' by manifest contract.
+ *
+ * @param {string} key Artifact key.
+ * @returns {{dest: string, regionId: string}|null}
+ */
+export function parseRegionKey(key) {
+  const i = String(key).indexOf(':');
+  if (i <= 0) return null;
+  return { dest: key.slice(0, i), regionId: key.slice(i + 1) };
+}
+
 
 /**
  * Fetch a file's content from the kit's git history.
@@ -228,17 +311,21 @@ export function runNpx(args) {
 
 /**
  * Build the managed-file plan from a manifest: text dests (templates +
- * per-profile rules, mirroring record-state's enumeration) and config paths
- * (mcpConfigPath/hooksConfigPath per agent profile).
+ * per-profile rules, mirroring record-state's enumeration), config paths
+ * (mcpConfigPath/hooksConfigPath per agent profile), and region dests
+ * (managedRegions: kit-managed marked regions inside project-owned
+ * files).
  *
  * @param {object} manifest Parsed onboard.manifest.json.
  * @returns {{textDests: Map<string,{src:string,agents:Set<string>|null}>,
- *   configPaths: Map<string,object>}}
+ *   configPaths: Map<string,object>,
+ *   regionDests: Map<string,{id:string,src:string}[]>}}
  *   `agents: null` marks a universal dest; a Set scopes it to those agents.
  */
 export function buildManagedPlan(manifest) {
   const textDests = new Map(); // dest -> {src, agents|null}
   const configPaths = new Map(); // cfgRel -> {mcpKey, hooksFormat, agents, source}
+  const regionDests = new Map(); // dest -> [{id, src}]
 
   for (const t of manifest.templates || []) {
     if (t.dest && t.src) textDests.set(t.dest, { src: t.src, agents: null });
@@ -269,7 +356,14 @@ export function buildManagedPlan(manifest) {
       else c.hooksFormat = profile.hooksConfigFormat || 'standalone';
     }
   }
-  return { textDests, configPaths };
+  for (const r of manifest.managedRegions || []) {
+    if (!r.id || !r.src || !Array.isArray(r.dests)) continue;
+    for (const dest of r.dests) {
+      (regionDests.get(dest) ?? regionDests.set(dest, []).get(dest))
+        .push({ id: r.id, src: r.src });
+    }
+  }
+  return { textDests, configPaths, regionDests };
 }
 
 /**

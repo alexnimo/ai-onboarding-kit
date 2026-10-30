@@ -1,15 +1,15 @@
-# Devin Onboarding Prompt (Combined)
+# Onboarding Prompt (Combined)
 
-> Paste this entire file into Devin (or any AI agent) to onboard a project in one session.
+> Paste this entire file into any AI coding agent runner to onboard a project in one session.
 > The agent will scaffold the directory structure, fill in placeholders, install missing skills,
 > merge MCP config, and produce a complete AI-optimized project setup.
 >
 > This is the combined version. For a split flow (recommended for re-runs or when you want
 > to control each phase), use:
->   - `prompts/devin-scaffold.md` — run scaffold, install skills, merge MCP/hooks/rules
->   - `prompts/devin-fill-placeholders.md` — fill placeholders (maturity-aware)
+>   - `prompts/onboard-scaffold.md` — run scaffold, install skills, merge MCP/hooks/rules
+>   - `prompts/onboard-fill.md` — fill placeholders (maturity-aware)
 >
-> For a quick start, use the short version: `prompts/devin-onboard-short.md`
+> For a quick start, use the short version: `prompts/onboard-short.md`
 
 ---
 
@@ -47,13 +47,20 @@ Detection steps:
 - Count source files to gauge size.
 - State your maturity detection result and reasoning to the user before proceeding.
 
-### Step 0b - Detect existing onboarding (config-only mode)
+### Step 0b - Detect existing onboarding
 
-If TARGET already has an `AGENTS.md` (or the agent profile's instructions file) AND a `.agents/` directory with content, this is a **re-onboarding** or **additional agent** scenario:
+Classify the target's instructions state:
 
-- Use **config-only mode**: run the scaffold with `--config-only` to skip templates and only configure skills + MCP for the target agent.
-- Do NOT overwrite the existing `AGENTS.md` or `.agents/` files.
-- Skip placeholder filling (Step 2) entirely — the existing docs are already filled.
+| State | Path |
+|---|---|
+| `AGENTS.md` contains `<!-- BEGIN ai-onboarding-kit:kit-region -->` AND `.agents/` has content | **Re-onboarding / additional agent** → `--config-only`, skip Step 2 entirely |
+| `AGENTS.md` exists WITHOUT kit markers | **Foreign project** → run the full scaffold; it injects the kit region into the existing file (only inserted lines; your content stays). Nothing to fill — the injected block is placeholder-free. |
+| No `AGENTS.md` | **New project** → full scaffold + fill (Step 2) |
+
+The scaffold never overwrites an existing instructions file. For foreign
+files it splices the kit block between `<!-- BEGIN/END
+ai-onboarding-kit:kit-region -->` markers after the first heading — the
+rest of the file stays project-owned and sync never touches it.
 
 ### Step 1 - Run the scaffold script
 

@@ -32,12 +32,24 @@
  *   GET    /api/plans/:id/merge?dest=         mergeFile() result
  *   POST   /api/plans/:id/apply {dispositions:{<dest>: accepted|reverted|kit}}
  *   GET    /api/history?project=<path>        lastSyncResult entries
+ *   GET    /api/profiles                      effective profiles + catalog
+ *   GET    /api/profiles/:id/plan?project=    planProfile() result (preview)
+ *   POST   /api/profiles/:id/sync {project?}  applyProfilePlan + record
+ *   POST   /api/profiles {id, ...fields}      create user profile
+ *   PUT    /api/profiles/:id                  edit user profile / kit override
+ *   DELETE /api/profiles/:id                  delete artifacts + profile
+ *   GET    /api/skills                        manifest skills + presence
+ *   POST   /api/skills/install {name}         npx skills add <src>@<skill>
+ *   POST   /api/skills/update {name}          npx skills update <name>
+ *   GET    /api/doctor                        per-project health findings
+ *   GET    /api/project/detail?path=          agents, configs, skill status
  */
 
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   STATE_REL_PATH,
@@ -45,10 +57,26 @@ import {
   loadRegistry,
   updateRegistry,
   resolveProjectPath,
+  writeFileAtomic,
+  writeJsonAtomic,
+  resolveManifestPath,
 } from './common.mjs';
-import { isObject } from './sync-utils.mjs';
+import {
+  effectiveProfiles,
+  planProfile,
+  applyProfilePlan,
+  deleteProfileArtifacts,
+  invokeStrings,
+  skillStatus,
+  PROFILES_USER_PATH,
+} from './profiles.mjs';
+import { checkProject } from './doctor.mjs';
+import { buildManagedPlan, isObject, extractRegion } from './sync-utils.mjs';
+import { getKitCommit } from './common.mjs';
 import { dryRun, mergeFile, applyDisposition } from './sync-engine.mjs';
 
+import { buildOnboardRows, mergeFactRows } from './onboard-plan.mjs';
+import { listRunners, spawnRunner } from './agent-spawn.mjs';
 export const UI_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)), '..', 'ui');
 
@@ -76,6 +104,12 @@ const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_HISTORY = 100;
 const MAX_PLANS = 200;
 const PLAN_TTL_MS = 30 * 60 * 1000;
+
+const PROFILE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+// Fields the UI/PUT routes may write onto user profiles or kit overrides.
+const PROFILE_EDITABLE = ['label', 'description', 'skills', 'cliTools',
+  'mcpServers', 'harnesses'];
+const PROFILE_LIST_FIELDS = ['skills', 'cliTools', 'mcpServers', 'harnesses'];
 
 /** Error carrying an HTTP status; anything else becomes a bare 500. */
 function httpError(status, message) {
@@ -204,8 +238,9 @@ function projectStateSummary(entry) {
 /**
  * Create the sync server.
  *
- * @param {object} opts {uiDir?, maxPlans?, planTtlMs?} extras are for tests.
- * @returns {{server: http.Server, plans: Map}}
+ * @param {object} opts {uiDir?, maxPlans?, planTtlMs?, home?,
+ *   profilesStatePath?} extras are for tests (home redirects user-scope
+ *   profile artifacts; profilesStatePath redirects profiles.user.json).
  */
 export function createUiServer(opts = {}) {
   const uiDir = path.resolve(opts.uiDir || UI_DIR);
@@ -216,6 +251,9 @@ export function createUiServer(opts = {}) {
   // plans are evicted on access and insert; beyond maxPlans the oldest
   // entries drop (Map preserves insertion order).
   const plans = new Map();
+  // Onboard plans live in their own store: different row vocabulary and
+  // apply semantics (scaffold-driven) than sync plans.
+  const onboardPlans = new Map();
 
   /** Drop plans older than the TTL. */
   const evictExpired = () => {
@@ -233,6 +271,61 @@ export function createUiServer(opts = {}) {
     }
     plans.set(id, plan);
   };
+  /** Same TTL/cap discipline for onboard plans. */
+  const putOnboardPlan = (id, plan) => {
+    evictExpired();
+    while (onboardPlans.size > 0 && onboardPlans.size >= maxPlans) {
+      onboardPlans.delete(onboardPlans.keys().next().value);
+    }
+    onboardPlans.set(id, plan);
+  };
+  const getOnboardPlan = id => {
+    const plan = onboardPlans.get(id);
+    if (!plan) throw httpError(404, `unknown onboard plan: ${id}`);
+    if (Date.parse(plan.createdAt) <= Date.now() - planTtlMs) {
+      onboardPlans.delete(id);
+      throw httpError(404, `expired onboard plan: ${id}`);
+    }
+    return plan;
+  };
+
+  /**
+   * Run the platform scaffold in --dry-run and return its fact rows.
+   * Writes nothing by contract (verified in the scaffold).
+   */
+  const scaffoldFacts = (target, profile, installSkills) => new Promise(resolve => {
+    const manifestDir = path.resolve(path.dirname(UI_DIR), '..');
+    const isWin = process.platform === 'win32';
+    const [cmd, args] = isWin
+      ? ['powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(manifestDir, 'scaffold.ps1'), '-Target', target, '-Agent', profile, '-DryRun', ...(installSkills ? ['-InstallSkills'] : [])]]
+      : ['bash', [path.join(manifestDir, 'scaffold.sh'), '--target', target, '--agent', profile, '--dry-run', ...(installSkills ? ['--install-skills'] : [])]];
+    execFile(cmd, args, { encoding: 'utf8', timeout: 120000, maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
+      if (err) return resolve([]);
+      try {
+        // @@PLAN_JSON@@ sentinel: stdout may carry stray human chatter on
+        // Windows (Write-Host leaks into the pipe under some hosts).
+        const json = String(stdout).split('@@PLAN_JSON@@').pop();
+        resolve(JSON.parse(json) || []);
+      } catch { resolve([]); }
+    });
+  });
+
+
+  /** Apply an onboard plan: run the real scaffold with an --only list. */
+  const scaffoldApply = (target, profile, artifacts, installSkills) => new Promise(resolve => {
+    const manifestDir = path.resolve(path.dirname(UI_DIR), '..');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'onboard-only-'));
+    const onlyFile = path.join(tmp, 'only.txt');
+    fs.writeFileSync(onlyFile, artifacts.join('\n') + '\n');
+    const isWin = process.platform === 'win32';
+    const [cmd, args] = isWin
+      ? ['powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(manifestDir, 'scaffold.ps1'), '-Target', target, '-Agent', profile, '-OnlyFile', onlyFile, ...(installSkills ? ['-InstallSkills'] : [])]]
+      : ['bash', [path.join(manifestDir, 'scaffold.sh'), '--target', target, '--agent', profile, '--only', onlyFile, ...(installSkills ? ['--install-skills'] : [])]];
+    execFile(cmd, args, { timeout: 600000, maxBuffer: 32 * 1024 * 1024 }, err => {
+      fs.rmSync(tmp, { recursive: true, force: true });
+      resolve(err ? { ok: false, error: `scaffold apply failed: ${err.message}` } : { ok: true });
+    });
+  });
 
   const sendJson = (res, status, obj) => {
     res.writeHead(status, {
@@ -245,6 +338,7 @@ export function createUiServer(opts = {}) {
   const sendError = (res, err) => {
     const status = err.expose ? err.status : 500;
     sendJson(res, status, { error: err.expose ? err.message : 'internal error' });
+    if (!err.expose) console.error('ui-server 500:', err);
   };
 
   /** Registry entry + state summary (API payload form). */
@@ -257,6 +351,122 @@ export function createUiServer(opts = {}) {
       throw httpError(400, err.message);
     }
   };
+
+  // ---------- profiles ----------
+
+  // User-scope artifacts resolve through `home` (opts.home in tests keeps
+  // writes out of the real home dir); state file redirects through
+  // profilesStatePath so tests never touch the real profiles.user.json.
+  const profilesStatePath = opts.profilesStatePath || PROFILES_USER_PATH;
+  const home = opts.home ?? os.homedir();
+  /** profiles.user.json -> state (missing file -> empty store). */
+  const loadProfilesState = () => {
+    const empty = { schemaVersion: 1, profiles: {}, overrides: {},
+      artifacts: {}, custom: { mcpServers: [], skills: [] } };
+    if (!fs.existsSync(profilesStatePath)) return empty;
+    const s = readJson(profilesStatePath);
+    const c = isObject(s.custom) ? s.custom : {};
+    return {
+      schemaVersion: s.schemaVersion ?? 1,
+      profiles: isObject(s.profiles) ? s.profiles : {},
+      overrides: isObject(s.overrides) ? s.overrides : {},
+      artifacts: isObject(s.artifacts) ? s.artifacts : {},
+      custom: {
+        mcpServers: Array.isArray(c.mcpServers) ? c.mcpServers : [],
+        skills: Array.isArray(c.skills) ? c.skills : [],
+      },
+    };
+  };
+
+  const saveProfilesState = state => {
+    writeJsonAtomic(profilesStatePath, {
+      schemaVersion: 1,
+      profiles: state.profiles,
+      overrides: state.overrides,
+      artifacts: state.artifacts,
+      custom: state.custom || { mcpServers: [], skills: [] },
+    });
+  };
+
+  /** Parsed manifest (loaded per request: no stale catalog). */
+  const loadManifest = () => readJson(resolveManifestPath(undefined));
+
+  /** Catalog names the create/edit forms validate against. */
+  const profileCatalog = (manifest, state) => ({
+    skills: [
+      ...(manifest.skills || []).map(s => s.name),
+      ...(manifest.templateSkills || []).map(t => t.dest),
+      ...(state?.custom?.skills || []).map(s => s.name),
+    ],
+    cliTools: (manifest.cliTools || []).map(t => t.name),
+    mcpServers: [
+      ...(manifest.mcpServers || []).map(s => ({
+        name: s.name, tier: s.tier || 'core', required: !!s.required,
+      })),
+      ...(state?.custom?.mcpServers || []).map(s => ({
+        name: s.name, tier: s.tier || 'specialist', required: false, custom: true,
+      })),
+    ],
+    harnesses: Object.keys(manifest.agentProfiles || {}),
+    custom: {
+      skills: state?.custom?.skills || [],
+      mcpServers: state?.custom?.mcpServers || [],
+    },
+  });
+
+  /** Profile -> API payload (skill presence + invoke strings). */
+  const profileRow = profile => ({
+    ...profile,
+    skills: skillStatus(profile, { home }),
+    invoke: invokeStrings(profile),
+  });
+
+  /**
+   * Validate + pick editable profile fields off a request body. Throws
+   * 400 on bad types or names outside the manifest catalog + custom items.
+   */
+  const pickProfileFields = (body, manifest, state) => {
+    const fields = {};
+    for (const key of PROFILE_EDITABLE) {
+      if (body[key] === undefined) continue;
+      if (PROFILE_LIST_FIELDS.includes(key)) {
+        if (!Array.isArray(body[key])
+            || body[key].some(v => typeof v !== 'string')) {
+          throw httpError(400, `${key} must be an array of strings`);
+        }
+        fields[key] = [...new Set(body[key])];
+      } else {
+        if (typeof body[key] !== 'string') {
+          throw httpError(400, `${key} must be a string`);
+        }
+        fields[key] = body[key];
+      }
+    }
+    const catalog = profileCatalog(manifest, state);
+    const mcpNames = new Set(catalog.mcpServers.map(s => s.name));
+    for (const name of fields.mcpServers || []) {
+      if (!mcpNames.has(name)) {
+        throw httpError(400, `unknown mcpServer: ${name}`);
+      }
+    }
+    const harnessNames = new Set(catalog.harnesses);
+    for (const name of fields.harnesses || []) {
+      if (!harnessNames.has(name)) {
+        throw httpError(400, `unknown harness: ${name}`);
+      }
+    }
+    const skillNames = new Set(catalog.skills);
+    for (const name of fields.skills || []) {
+      if (!skillNames.has(name)) {
+        throw httpError(400, `unknown skill: ${name}`);
+      }
+    }
+    return fields;
+  };
+
+  /** Effective profile by id (null when unknown or disabled). */
+  const findProfile = (manifest, state, id) =>
+    effectiveProfiles(manifest, state).find(p => p.id === id) || null;
 
   const getPlan = id => {
     const plan = plans.get(id);
@@ -545,6 +755,422 @@ export function createUiServer(opts = {}) {
       throw httpError(405, 'method not allowed');
     }
 
+    // GET /api/profiles - effective profiles + form catalog.
+    if (method === 'GET' && pathname === '/api/profiles') {
+      const manifest = loadManifest();
+      const state = loadProfilesState();
+      sendJson(res, 200, {
+        profiles: effectiveProfiles(manifest, state).map(profileRow),
+        catalog: profileCatalog(manifest, state),
+      });
+      return;
+    }
+
+    // POST /api/profiles {id, label?, description?, skills?, cliTools?,
+    //   mcpServers?, harnesses?} - create a user profile.
+    if (method === 'POST' && pathname === '/api/profiles') {
+      const body = await readJsonBody(req);
+      const manifest = loadManifest();
+      const id = body.id;
+      if (typeof id !== 'string' || !PROFILE_ID_RE.test(id)) {
+        throw httpError(400,
+          'id must match /^[a-z0-9][a-z0-9-]*$/ (lowercase letters, digits, dashes)');
+      }
+      const state = loadProfilesState();
+      if (findProfile(manifest, state, id)
+          || (manifest.profiles || []).some(p => p.id === id)) {
+        throw httpError(409, `profile '${id}' already exists`);
+      }
+      const fields = pickProfileFields(body, manifest, state);
+      const profile = {
+        label: fields.label ?? id,
+        description: fields.description ?? '',
+        skills: fields.skills ?? [],
+        cliTools: fields.cliTools ?? [],
+        mcpServers: fields.mcpServers ?? [],
+        harnesses: fields.harnesses ?? ['omp'],
+      };
+      state.profiles[id] = profile;
+      saveProfilesState(state);
+      sendJson(res, 201, {
+        profile: { ...profile, id, origin: 'user' },
+      });
+      return;
+    }
+
+    // /api/profiles/:id[/plan|/sync]
+    const profMatch = /^\/api\/profiles\/([^/]+)(\/(plan|sync))?$/.exec(pathname);
+    if (profMatch) {
+      const id = decodeURIComponent(profMatch[1]);
+      const sub = profMatch[3];
+      const manifest = loadManifest();
+      const state = loadProfilesState();
+
+      if (sub === 'plan' && method === 'GET') {
+        const profile = findProfile(manifest, state, id);
+        if (!profile) throw httpError(404, `unknown profile: ${id}`);
+        const raw = searchParams.get('project');
+        const projectRoot = raw ? resolveProjectParam(raw) : null;
+        const plan = planProfile(profile, manifest, projectRoot, { home });
+        sendJson(res, 200, {
+          profile: id,
+          warnings: plan.warnings,
+          artifacts: plan.artifacts.map(a => ({
+            harness: a.harness, scope: a.scope, dest: a.dest,
+          })),
+          invoke: invokeStrings(profile),
+        });
+        return;
+      }
+
+      if (sub === 'sync' && method === 'POST') {
+        const profile = findProfile(manifest, state, id);
+        if (!profile) throw httpError(404, `unknown profile: ${id}`);
+        const body = await readJsonBody(req);
+        const projectRoot = body.project
+          ? resolveProjectParam(body.project) : null;
+        const plan = planProfile(profile, manifest, projectRoot, { home });
+        const results = applyProfilePlan(plan, profile, state);
+        saveProfilesState(state);
+        sendJson(res, 200, {
+          skills: skillStatus(profile, { home }),
+          warnings: plan.warnings,
+          results,
+          invoke: invokeStrings(profile),
+        });
+        return;
+      }
+
+      // PUT /api/profiles/:id - user profiles replace editable fields;
+      // kit profiles merge them into state.overrides[id] ({disabled:true}
+      // hides a kit profile).
+      if (!sub && method === 'PUT') {
+        const body = await readJsonBody(req);
+        const isUser = isObject(state.profiles[id]);
+        const isKit = (manifest.profiles || []).some(p => p.id === id);
+        if (!isUser && !isKit) {
+          throw httpError(404, `unknown profile: ${id}`);
+        }
+        const fields = pickProfileFields(body, manifest, state);
+        if (isUser) {
+          state.profiles[id] = { ...state.profiles[id], ...fields };
+        } else {
+          state.overrides[id] = { ...state.overrides[id], ...fields };
+          if (body.disabled === true) state.overrides[id].disabled = true;
+          if (body.disabled === false) delete state.overrides[id].disabled;
+        }
+        saveProfilesState(state);
+        sendJson(res, 200, {
+          profile: findProfile(manifest, state, id),
+        });
+        return;
+      }
+
+      // DELETE /api/profiles/:id - remove recorded artifacts, then drop the
+      // user profile and/or kit override. The kit manifest definition is
+      // never touched (kitProfile:true tells the UI it persists).
+      if (!sub && method === 'DELETE') {
+        const isUser = isObject(state.profiles[id]);
+        const isKit = (manifest.profiles || []).some(p => p.id === id);
+        if (!isUser && !isKit && !isObject(state.overrides[id])) {
+          throw httpError(404, `unknown profile: ${id}`);
+        }
+        const removed = deleteProfileArtifacts(id, state, { home });
+        delete state.profiles[id];
+        delete state.overrides[id];
+        saveProfilesState(state);
+        sendJson(res, 200, { removed, kitProfile: isKit });
+        return;
+      }
+
+      throw httpError(405, 'method not allowed');
+    }
+    // GET /api/skills - manifest skill catalog + presence + cliTools.
+    if (method === 'GET' && pathname === '/api/skills') {
+      const manifest = loadManifest();
+      const skillRows = (manifest.skills || []).map(s => ({
+        name: s.name,
+        source: s.source,
+        skill: s.skill,
+        category: s.category || '',
+        required: !!s.required,
+        installed: skillStatus({ skills: [s.name] }, { home })[0].present,
+      }));
+      const templateRows = (manifest.templateSkills || []).map(t => ({
+        name: t.dest,
+        source: 'kit template',
+        skill: t.dest,
+        category: 'template',
+        required: !!t.required,
+        installed: skillStatus({ skills: [t.dest] }, { home })[0].present,
+      }));
+      const toolRows = (manifest.cliTools || []).map(t => ({
+        name: t.name, install: t.install, check: t.check,
+        required: !!t.required, category: t.category || '',
+        hint: t.hint || '',
+      }));
+      sendJson(res, 200, {
+        skills: [...skillRows, ...templateRows],
+        cliTools: toolRows,
+        mcpServers: (manifest.mcpServers || []).map(s => ({
+          name: s.name, tier: s.tier || 'core', required: !!s.required,
+          hint: s.hint || '',
+        })),
+      });
+      return;
+    }
+
+    // POST /api/skills/install|update {name} - runs npx skills add/update.
+    // Commands come from manifest metadata (source@skill for install, name
+    // for update) - arbitrary input never reaches the shell (execFile, no
+    // shell:true).
+    if (method === 'POST' && /^\/api\/skills\/(install|update)$/.test(pathname)) {
+      const action = pathname.endsWith('install') ? 'install' : 'update';
+      const body = await readJsonBody(req);
+      const manifest = loadManifest();
+      const entry = (manifest.skills || []).find(s => s.name === body.name);
+      if (!entry) throw httpError(400, `unknown skill: ${body.name}`);
+      const args = action === 'install'
+        ? ['skills', 'add', `${entry.source}@${entry.skill}`, '-g', '-y']
+        : ['skills', 'update', entry.name, '-g', '-y'];
+      const result = await new Promise(resolve => {
+        execFile('npx', args, { timeout: 300000, maxBuffer: 4 * 1024 * 1024 },
+          (err, stdout, stderr) => resolve({
+            ok: !err,
+            command: `npx ${args.join(' ')}`,
+            output: String(stdout || '').slice(-4000),
+            error: err ? String(stderr || err.message || 'failed').slice(-2000) : null,
+          }));
+      });
+
+      sendJson(res, result.ok ? 200 : 500, result);
+      return;
+    }
+    // POST /api/catalog/skill {name, source, skill} - declare a custom
+    // (user-catalog) skill so profiles can reference it. Does NOT install;
+    // use /api/skills/install afterwards to run npx skills add.
+    if (method === 'POST' && pathname === '/api/catalog/skill') {
+      const body = await readJsonBody(req);
+      const manifest = loadManifest();
+      const state = loadProfilesState();
+      const { name, source, skill } = body;
+      if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9-_]*$/i.test(name)) {
+        throw httpError(400, 'name must be letters/digits/dash/underscore');
+      }
+      if ((manifest.skills || []).some(s => s.name === name)
+          || state.custom.skills.some(s => s.name === name)) {
+        throw httpError(409, `skill '${name}' already in catalog`);
+      }
+      const entry = {
+        name,
+        source: typeof source === 'string' ? source : '',
+        skill: typeof skill === 'string' ? skill : name,
+        category: typeof body.category === 'string' ? body.category : 'custom',
+      };
+      state.custom.skills.push(entry);
+      saveProfilesState(state);
+      sendJson(res, 201, { skill: entry });
+      return;
+    }
+
+    // POST /api/catalog/mcp {name, command, args?, env?, tier?} - declare a
+    // custom MCP server; profiles can reference it and emitters write the
+    // config into profile destinations.
+    if (method === 'POST' && pathname === '/api/catalog/mcp') {
+      const body = await readJsonBody(req);
+      const manifest = loadManifest();
+      const state = loadProfilesState();
+      const { name, command } = body;
+      if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9-_]*$/i.test(name)) {
+        throw httpError(400, 'name must be letters/digits/dash/underscore');
+      }
+      if (typeof command !== 'string' || !command.trim()) {
+        throw httpError(400, 'command is required');
+      }
+      if ((manifest.mcpServers || []).some(s => s.name === name)
+          || state.custom.mcpServers.some(s => s.name === name)) {
+        throw httpError(409, `mcp server '${name}' already exists`);
+      }
+      const entry = {
+        name,
+        tier: body.tier === 'core' ? 'core' : 'specialist',
+        hint: typeof body.hint === 'string' ? body.hint : 'user-declared server',
+        config: {
+          command: command.trim(),
+          args: Array.isArray(body.args)
+            ? body.args.map(String) : [],
+          env: isObject(body.env)
+            ? Object.fromEntries(Object.entries(body.env).map(([k, v]) => [k, String(v)]))
+            : {},
+        },
+      };
+      state.custom.mcpServers.push(entry);
+      saveProfilesState(state);
+      sendJson(res, 201, { mcpServer: entry });
+      return;
+    }
+
+    // DELETE /api/catalog/mcp?name= - remove a custom server (refused while
+    // any profile still references it).
+    if (method === 'DELETE' && pathname === '/api/catalog/mcp') {
+      const name = searchParams.get('name');
+      if (!name) throw httpError(400, 'missing required query param: name');
+      const state = loadProfilesState();
+      const idx = state.custom.mcpServers.findIndex(s => s.name === name);
+      if (idx === -1) throw httpError(404, `unknown custom server: ${name}`);
+      const refs = effectiveProfiles(loadManifest(), state)
+        .filter(p => (p.mcpServers || []).includes(name)).map(p => p.id);
+      if (refs.length) {
+        throw httpError(409,
+          `server '${name}' is referenced by profiles: ${refs.join(', ')}`);
+      }
+      state.custom.mcpServers.splice(idx, 1);
+      saveProfilesState(state);
+      sendJson(res, 200, { removed: name });
+      return;
+    }
+
+    // DELETE /api/catalog/skill?name= - remove a custom skill ref.
+    if (method === 'DELETE' && pathname === '/api/catalog/skill') {
+      const name = searchParams.get('name');
+      if (!name) throw httpError(400, 'missing required query param: name');
+      const state = loadProfilesState();
+      const idx = state.custom.skills.findIndex(s => s.name === name);
+      if (idx === -1) throw httpError(404, `unknown custom skill: ${name}`);
+      const refs = effectiveProfiles(loadManifest(), state)
+        .filter(p => (p.skills || []).includes(name)).map(p => p.id);
+      if (refs.length) {
+        throw httpError(409,
+          `skill '${name}' is referenced by profiles: ${refs.join(', ')}`);
+      }
+      state.custom.skills.splice(idx, 1);
+      saveProfilesState(state);
+      sendJson(res, 200, { removed: name });
+      return;
+    }
+
+    // POST /api/profiles/:id/rename {newId} - rename a user profile and
+    // rekey its recorded artifacts (kit profiles are read-only names).
+    const renameMatch = /^\/api\/profiles\/([^/]+)\/rename$/.exec(pathname);
+    if (renameMatch && method === 'POST') {
+      const id = decodeURIComponent(renameMatch[1]);
+      const body = await readJsonBody(req);
+      const newId = body.newId;
+      if (typeof newId !== 'string' || !PROFILE_ID_RE.test(newId)) {
+        throw httpError(400, 'newId must match /^[a-z0-9][a-z0-9-]*$/');
+      }
+      const manifest = loadManifest();
+      const state = loadProfilesState();
+      if (!isObject(state.profiles[id])) {
+        if ((manifest.profiles || []).some(p => p.id === id)) {
+          throw httpError(400,
+            'kit profiles cannot be renamed — create a user profile instead');
+        }
+        throw httpError(404, `unknown profile: ${id}`);
+      }
+      if (isObject(state.profiles[newId])
+          || (manifest.profiles || []).some(p => p.id === newId)) {
+        throw httpError(409, `profile '${newId}' already exists`);
+      }
+      state.profiles[newId] = state.profiles[id];
+      delete state.profiles[id];
+      const rekeyed = {};
+      for (const [k, v] of Object.entries(state.artifacts)) {
+        rekeyed[k.startsWith(`${id}:`) ? `${newId}:${k.slice(id.length + 1)}` : k] = v;
+      }
+      state.artifacts = rekeyed;
+      saveProfilesState(state);
+      sendJson(res, 200, { renamed: { from: id, to: newId } });
+      return;
+    }
+
+    // GET /api/doctor - per-project health findings (doctor.checkProject).
+    if (method === 'GET' && pathname === '/api/doctor') {
+      const manifest = loadManifest();
+      const manifestPath = resolveManifestPath(undefined);
+      const ctx = {
+        manifest,
+        manifestPath,
+        manifestRoot: path.dirname(manifestPath),
+        plan: buildManagedPlan(manifest),
+        kitCommit: getKitCommit(),
+        staleDays: 30,
+      };
+      const reg = loadRegistry();
+      sendJson(res, 200, {
+        generatedAt: new Date().toISOString(),
+        kitCommit: ctx.kitCommit,
+        projects: reg.projects.map(e => checkProject(e, ctx)),
+      });
+      return;
+    }
+
+    // GET /api/project/detail?path= - agents, config files present, kit vs
+    // project skill status, profile artifacts touching this project.
+    if (method === 'GET' && pathname === '/api/project/detail') {
+      const raw = searchParams.get('path');
+      if (!raw) throw httpError(400, 'missing required query param: path');
+      const projectRoot = resolveProjectParam(raw);
+      if (!fs.existsSync(projectRoot)) {
+        throw httpError(400, `project path does not exist: ${projectRoot}`);
+      }
+      const manifest = loadManifest();
+      const profiles = manifest.agentProfiles || {};
+      const reg = loadRegistry();
+      const entry = reg.projects.find(p => path.resolve(p.path) === projectRoot);
+      const agents = (entry?.agents || []).map(name => {
+        const ap = profiles[name] || {};
+        const files = [ap.instructionsFile, ap.mcpConfigPath,
+          ap.hooksConfigPath, ap.rulesDir]
+          .filter(Boolean)
+          .map(rel => ({ rel, exists: fs.existsSync(path.join(projectRoot, rel)) }));
+        return {
+          name,
+          files,
+          specialist: ap.specialist?.kind || 'none',
+          mcpConfigPath: ap.mcpConfigPath || null,
+          rulesDir: ap.rulesDir || null,
+          skillDirs: ap.skillDirs || [],
+        };
+      });
+      // MCP servers actually present per agent config file.
+      const mcpPresent = {};
+      for (const [name, ap] of Object.entries(profiles)) {
+        if (!ap.mcpConfigPath || !(entry?.agents || []).includes(name)) continue;
+        const p = path.join(projectRoot, ap.mcpConfigPath);
+        try {
+          const j = readJson(p);
+          mcpPresent[name] = Object.keys(j?.[ap.mcpConfigKey || 'mcpServers'] || {});
+        } catch { mcpPresent[name] = []; }
+      }
+      // Specialist profile artifacts planned for this project.
+      const state = loadProfilesState();
+      const profs = effectiveProfiles(manifest, state).map(p => {
+        const plan = planProfile(p, manifest, projectRoot, { home });
+        return {
+          id: p.id, origin: p.origin,
+          artifacts: plan.artifacts.map(a => ({
+            harness: a.harness, dest: a.dest,
+            exists: fs.existsSync(a.absPath),
+          })),
+        };
+      });
+      sendJson(res, 200, {
+        path: projectRoot,
+        name: entry?.name || path.basename(projectRoot),
+        agents,
+        mcpPresent,
+        profiles: profs,
+        requiredSkills: (manifest.skills || [])
+          .filter(s => s.required)
+          .map(s => ({
+            name: s.name,
+            installed: skillStatus({ skills: [s.name] }, { home })[0].present,
+          })),
+      });
+      return;
+    }
+
     // GET /api/history?project=<path>
     if (method === 'GET' && pathname === '/api/history') {
       const raw = searchParams.get('project');
@@ -564,8 +1190,148 @@ export function createUiServer(opts = {}) {
       return;
     }
 
+    // GET /api/onboard/agents - runner table for the view's --agent picker.
+    if (method === 'GET' && pathname === '/api/onboard/agents') {
+      sendJson(res, 200, { agents: listRunners() });
+      return;
+    }
+
+    // POST /api/onboard/plans {target, profile?, agent?, installSkills?}
+    if (method === 'POST' && pathname === '/api/onboard/plans') {
+      const body = await readJsonBody(req);
+      if (typeof body.target !== 'string' || !body.target) {
+        throw httpError(400, 'target must be a non-empty string');
+      }
+      const projectRoot = path.resolve(body.target);
+      if (!fs.existsSync(projectRoot)) {
+        throw httpError(400, `target path does not exist: ${projectRoot}`);
+      }
+      const rows = buildOnboardRows(projectRoot, {
+        profile: body.profile || 'devin',
+      }).rows;
+      // Shell fact rows - same call the CLI makes (never writes).
+      const factRows = await scaffoldFacts(projectRoot, body.profile || 'devin', !!body.installSkills);
+      const plan = mergeFactRows(rows, factRows);
+      const byAction = {};
+      for (const r of plan) byAction[r.action] = (byAction[r.action] || 0) + 1;
+      const planId = crypto.randomUUID();
+      const record = {
+        id: planId,
+        kind: 'onboard',
+        createdAt: new Date().toISOString(),
+        target: projectRoot,
+        profile: body.profile || 'devin',
+        agent: body.agent || 'devin',
+        resolveWith: body.resolveWith || null,
+        installSkills: !!body.installSkills,
+        plan,
+        summary: { total: plan.length, byAction },
+      };
+      putOnboardPlan(planId, record);
+      sendJson(res, 200, { planId, ...record });
+      return;
+    }
+
+    // /api/onboard/plans/:id[/apply|/resolve]
+    const onbMatch = /^\/api\/onboard\/plans\/([^/]+)(\/(apply|resolve))?$/.exec(pathname);
+    if (onbMatch) {
+      const plan = getOnboardPlan(onbMatch[1]);
+      const sub = onbMatch[3];
+
+      if (!sub && method === 'GET') {
+        sendJson(res, 200, plan);
+        return;
+      }
+
+      // POST /apply {accepted: string[], content?: {<artifact>: text}}
+      // Runs the real scaffold with an --only allowlist of the accepted
+      // artifacts; `content` (agent-resolved or edited text) is written to
+      // the artifact's file first, guarded by the marker scan.
+      if (sub === 'apply' && method === 'POST') {
+        const body = await readJsonBody(req);
+        if (!Array.isArray(body.accepted)) {
+          throw httpError(400, 'accepted must be an array of artifact names');
+        }
+        const valid = new Set(plan.plan.map(r => r.artifact));
+        for (const a of body.accepted) {
+          if (!valid.has(a)) throw httpError(400, `artifact not in plan: ${a}`);
+        }
+        // Write accepted content edits before the scaffold run so
+        // record-state captures the resolved bytes. File artifacts only -
+        // region keys map to their file; (project) is bookkeeping.
+        if (isObject(body.content)) {
+          for (const [artifact, text] of Object.entries(body.content)) {
+            if (typeof text !== 'string') {
+              throw httpError(400, `content for ${artifact} must be a string`);
+            }
+            if (!valid.has(artifact)) {
+              throw httpError(400, `content artifact not in plan: ${artifact}`);
+            }
+            const dest = artifact.split(':')[0];
+            // Region artifacts keep their markers: a resolved file whose
+            // markers vanished would desync the region record (sync could
+            // no longer locate the managed block).
+            const regionId = artifact.includes(':') ? artifact.split(':')[1] : null;
+            if (regionId && extractRegion(text, regionId) === null) {
+              throw httpError(400,
+                `resolved content for ${artifact} dropped the ${regionId} markers - the kit-managed region must survive`);
+            }
+            writeFileAtomic(path.join(plan.target, dest), text);
+          }
+        }
+        const files = body.accepted.filter(a => a !== '(project)');
+        const result = await scaffoldApply(plan.target, plan.profile, files, plan.installSkills);
+        sendJson(res, result.ok ? 200 : 500, {
+          ok: result.ok,
+          applied: body.accepted,
+          error: result.error || null,
+        });
+        return;
+      }
+
+      // POST /resolve {artifact, runner?} - agent-assisted resolution.
+      // Spawns the runner with a resolve prompt; returns its stdout. The
+      // caller then applies via /apply's content path (marker scan runs
+      // there for region artifacts).
+      if (sub === 'resolve' && method === 'POST') {
+        const body = await readJsonBody(req);
+        const row = plan.plan.find(r => r.artifact === body.artifact);
+        if (!row) throw httpError(400, `artifact not in plan: ${body.artifact}`);
+        const runnerKey = body.runner || plan.resolveWith || plan.agent;
+        const dest = row.artifact.split(':')[0];
+        const destAbs = path.join(plan.target, dest);
+        const current = fs.existsSync(destAbs) ? fs.readFileSync(destAbs, 'utf8') : '';
+        const prompt = [
+          `You are resolving an onboarding conflict in project ${plan.target}.`,
+          `Artifact: ${row.artifact}`,
+          '',
+          '## Planned change (diff)',
+          row.diff || '(no diff)',
+          '',
+          '## Current file content',
+          current || '(file does not exist)',
+          '',
+          'Output the resolved file content ONLY - no commentary, no markdown fences.',
+        ].join('\n');
+        const res2 = spawnRunner(runnerKey, prompt, { cwd: plan.target });
+        if (!res2.ok) throw httpError(400, res2.error || 'runner failed');
+        sendJson(res, 200, {
+          artifact: row.artifact,
+          runner: runnerKey,
+          content: res2.stdout,
+        });
+        return;
+      }
+
+      throw httpError(405, 'method not allowed');
+    }
+
+
     if (pathname === '/api/projects' || pathname === '/api/history'
-        || pathname === '/api/dry-run' || pathname.startsWith('/api/plans/')) {
+        || pathname === '/api/dry-run' || pathname === '/api/onboard/agents'
+        || pathname.startsWith('/api/profiles')
+        || pathname.startsWith('/api/plans/')
+        || pathname.startsWith('/api/onboard/plans')) {
       throw httpError(405, 'method not allowed');
     }
     throw httpError(404, 'not found');
@@ -601,7 +1367,7 @@ export function createUiServer(opts = {}) {
     })().catch(err => sendError(res, err));
   });
 
-  return { server, plans };
+  return { server, plans, onboardPlans };
 }
 
 /**
@@ -610,11 +1376,11 @@ export function createUiServer(opts = {}) {
  * @param {object} opts {port?, uiDir?, maxPlans?, planTtlMs?}
  */
 export async function startUiServer(opts = {}) {
-  const { server, plans } = createUiServer(opts);
+  const { server, plans, onboardPlans } = createUiServer(opts);
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(opts.port ?? 4173, '127.0.0.1', resolve);
   });
   const { port } = server.address();
-  return { server, plans, port, url: `http://127.0.0.1:${port}` };
+  return { server, plans, onboardPlans, port, url: `http://127.0.0.1:${port}` };
 }

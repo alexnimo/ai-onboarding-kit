@@ -1,6 +1,6 @@
-# Devin Placeholder Fill Prompt
+# Placeholder Fill Prompt
 
-> Paste this into Devin (or any AI agent) running in an already-scaffolded project.
+> Paste this into any AI coding agent runner running in an already-scaffolded project.
 > The agent will fill the `{{placeholders}}` in the generated files based on project maturity.
 > It will NOT run the scaffold script, install skills, or merge MCP config — those were already done.
 >
@@ -150,6 +150,13 @@ For each generated file, replace `{{KEY}}` with the resolved value:
 - For TBD values: keep as `{{KEY}}` with a `<!-- TODO: fill when known -->` comment on the line above, so they're easy to find later with grep.
 - For N/A values: replace with the N/A note (e.g., `<!-- N/A — no database -->`).
 
+
+**Where the placeholders live:** all `AGENTS.md` placeholders sit in the
+`## Project profile` section BELOW the
+`<!-- END ai-onboarding-kit:kit-region -->` marker. The text between
+`<!-- BEGIN`/`END ai-onboarding-kit:kit-region -->` markers is
+**kit-managed — never edit it** (the sync engine owns it; edits there
+produce merge conflicts). Fill only placeholders outside the markers.
 Files to fill (all in the TARGET project):
 - `AGENTS.md`
 - `.agents/SYSTEM.md`

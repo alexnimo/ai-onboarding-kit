@@ -50,12 +50,18 @@ import {
   canon,
   getPath,
   setPath,
+  parseRegionKey,
+  extractRegion,
+  spliceRegion,
+  injectRegion,
 } from './sync-utils.mjs';
 import { splitLines, diffHunks } from './diff3.mjs';
 import {
   reconstructBase,
   syncTextDest,
   syncConfigFile,
+  syncRegionDest,
+  expandKitRegions,
   prepareConfig,
   commitConfig,
 } from './sync-files.mjs';
@@ -220,6 +226,19 @@ export function openProject(entry, ctx) {
  * @param {string} dest Project-relative dest path.
  */
 export function syncDest(pctx, dest) {
+  const regionKey = parseRegionKey(dest);
+  if (regionKey) {
+    const regions = pctx.ctx.plan.regionDests?.get(regionKey.dest) || [];
+    const region = regions.find(r => r.id === regionKey.regionId);
+    if (region) return syncRegionDest(pctx, regionKey.dest, region);
+    pctx.row(dest, 'retired', 'region no longer managed by manifest');
+    return;
+  }
+  if (pctx.ctx.plan.regionDests?.has(dest)) {
+    // Dest is region-managed: the region pass owns it entirely (fresh
+    // installs render through the region path).
+    return;
+  }
   const cfgPlan = pctx.ctx.plan.configPaths.get(dest);
   if (cfgPlan) return syncConfigFile(pctx, dest, cfgPlan);
   return syncTextDest(pctx, dest);
@@ -237,13 +256,36 @@ export function syncDests(pctx) {
   // Text dests: manifest plan plus recorded artifacts that are not config
   // paths (artifacts the manifest dropped surface as `retired`). Adoption
   // runs skip this pass entirely - the kit never guesses a base for
-  // template/rule files it cannot prove it installed.
+  // template/rule files it cannot prove it installed. Region artifact
+  // keys (`<dest>:<id>`) and region-managed dests never enter this pass:
+  // a stray `AGENTS.md:kit-region` would hit `existsSync` as a literal
+  // path, report `retired`, and --prune would delete the record.
   if (!pctx.adopted) {
     const textDests = new Set(ctx.plan.textDests.keys());
     for (const dest of Object.keys(artifacts)) {
-      if (!ctx.plan.configPaths.has(dest)) textDests.add(dest);
+      if (!ctx.plan.configPaths.has(dest) && !parseRegionKey(dest)) {
+        textDests.add(dest);
+      }
     }
-    for (const dest of textDests) syncTextDest(pctx, dest);
+    for (const dest of textDests) {
+      if (ctx.plan.regionDests?.has(dest)) continue; // region pass owns it
+      syncTextDest(pctx, dest);
+    }
+  }
+  // Region pass: runs even for adopted projects - injection is the whole
+  // point of adopt for foreign instruction files (spec: lift of the
+  // !adopted gate for regions).
+  for (const [dest, regions] of ctx.plan.regionDests || []) {
+    for (const region of regions) syncRegionDest(pctx, dest, region);
+  }
+  // Region records whose dest/id left the manifest surface as retired.
+  for (const key of Object.keys(artifacts)) {
+    const rk = parseRegionKey(key);
+    if (!rk) continue;
+    const regions = ctx.plan.regionDests?.get(rk.dest) || [];
+    if (!regions.some(r => r.id === rk.regionId)) {
+      pctx.row(key, 'retired', 'region no longer managed by manifest; record kept');
+    }
   }
   for (const [cfgRel, cfgPlan] of ctx.plan.configPaths) {
     syncConfigFile(pctx, cfgRel, cfgPlan);
@@ -282,11 +324,19 @@ export function persistSyncState(pctx) {
  */
 export function finalizeProject(pctx) {
   const { ctx, state, projectRoot } = pctx;
-  for (const dest of [...pctx.unresolved]) {
+  for (const key of [...pctx.unresolved]) {
+    const rk = parseRegionKey(key);
+    const dest = rk ? rk.dest : key;
     const abs = path.join(projectRoot, dest);
-    const stillMarked = fs.existsSync(abs)
-      && CONFLICT_MARKER_RE.test(fs.readFileSync(abs, 'utf8'));
-    if (!stillMarked) pctx.unresolved.delete(dest);
+    let stillMarked = false;
+    if (fs.existsSync(abs)) {
+      const text = fs.readFileSync(abs, 'utf8');
+      // Region-scoped marker check: a `<<<<<<<` outside the managed
+      // region is project content, not our conflict.
+      const scanText = rk ? (extractRegion(text, rk.regionId) ?? '') : text;
+      stillMarked = CONFLICT_MARKER_RE.test(scanText);
+    }
+    if (!stillMarked) pctx.unresolved.delete(key);
   }
   const unresolvedBefore = new Set(state.unresolved || []);
   const unresolvedChanged = pctx.unresolved.size !== unresolvedBefore.size
@@ -425,7 +475,9 @@ export function mergeFile(projectRoot, dest, opts = {}) {
   const { pctx } = openProject(entry, ctx);
   if (!pctx) return null;
 
-  const destAbs = path.join(pctx.projectRoot, dest);
+  const rk = parseRegionKey(dest);
+  const fileDest = rk ? rk.dest : dest;
+  const destAbs = path.join(pctx.projectRoot, fileDest);
   const project = fs.existsSync(destAbs) ? fs.readFileSync(destAbs, 'utf8') : null;
   const cfgPlan = ctx.plan.configPaths.get(dest);
 
@@ -442,6 +494,21 @@ export function mergeFile(projectRoot, dest, opts = {}) {
     }
     base = baseMap;
     kit = kitMap;
+  } else if (rk) {
+    // Region: base/kit are the REGION source text (record.source points
+    // at the region src file, not a full template).
+    const rec = pctx.artifacts[dest];
+    const regions = ctx.plan.regionDests?.get(rk.dest) || [];
+    const region = regions.find(r => r.id === rk.regionId);
+    const srcRel = rec?.source || region?.src;
+    const srcAbs = srcRel ? path.join(ctx.manifestRoot, srcRel) : null;
+    if (srcAbs && rec) {
+      const baseText = reconstructBase(rec, srcAbs, pctx.state.kitCommit, ctx.manifestRoot);
+      if (baseText !== null) base = extractRegion(baseText, rk.regionId) ?? baseText;
+    }
+    if (srcAbs && fs.existsSync(srcAbs)) {
+      kit = fs.readFileSync(srcAbs, 'utf8').replace(/\r?\n$/, ''); // match region text on disk
+    }
   } else {
     const rec = pctx.artifacts[dest];
     const info = ctx.plan.textDests.get(dest);
@@ -494,10 +561,81 @@ export function applyDisposition(projectRoot, dest, disposition, opts = {}) {
   const entry = projectEntry(projectRoot);
   const { pr, pctx } = openProject(entry, ctx);
   if (!pctx) throw new Error(`project not syncable: ${pr.status}`);
-  const destAbs = path.join(pctx.projectRoot, dest);
+  const rk = parseRegionKey(dest);
+  const fileDest = rk ? rk.dest : dest;
+  const destAbs = path.join(pctx.projectRoot, fileDest);
+  const regions = rk ? (ctx.plan.regionDests?.get(rk.dest) || []) : [];
+  const region = rk ? regions.find(r => r.id === rk.regionId) : null;
+  if (rk && !region) throw new Error(`not a managed region: ${dest}`);
   const cfgPlan = ctx.plan.configPaths.get(dest);
-  const isManaged = cfgPlan || ctx.plan.textDests.has(dest) || pctx.artifacts[dest];
+  const isManaged = cfgPlan || ctx.plan.textDests.has(dest)
+    || pctx.artifacts[dest] || region;
   if (!isManaged) throw new Error(`not a managed dest: ${dest}`);
+  // Region apply (dest = '<file>:<id>'): 'accepted' runs the region sync
+  // pass; 'accepted'+content writes whole-file content with the marker
+  // scan scoped to the region; 'kit' splices the kit block inside the
+  // markers (injecting when absent). Caller content is allowed only when
+  // a region record exists or markers are present - injecting caller
+  // content into a markerless foreign file is off-limits.
+  if (region) {
+    if (pctx.pins[dest] !== undefined || pctx.pins[fileDest] !== undefined
+        || pctx.skipSet.has(dest) || pctx.skipSet.has(fileDest)) {
+      throw new Error(`dest is pinned/exempt: ${dest}`);
+    }
+    if (disposition === 'reverted') {
+      return { dest, disposition, changed: false, conflict: false, rows: [] };
+    }
+    if (disposition === 'accepted' && typeof opts.content !== 'string') {
+      syncDest(pctx, dest);
+    } else {
+      const local = fs.existsSync(destAbs) ? fs.readFileSync(destAbs, 'utf8') : '';
+      const hasMarkers = extractRegion(local, rk.regionId) !== null;
+      if (disposition === 'accepted') {
+        if (fs.existsSync(destAbs) && !hasMarkers && !pctx.artifacts[dest]) {
+          throw new Error(`unmanaged file (no markers, no record): ${fileDest}`);
+        }
+        pctx.writeFile(destAbs, opts.content);
+        pctx.artifacts[dest] = {
+          ...(pctx.artifacts[dest] || {}),
+          hash: pctx.artifacts[dest]?.hash || sha256(extractRegion(opts.content, rk.regionId) ?? opts.content),
+          source: region.src,
+          syncedAt: pctx.now,
+          kitCommit: ctx.kitCommit,
+          region: true,
+        };
+        const regionText = extractRegion(opts.content, rk.regionId);
+        if (regionText !== null && CONFLICT_MARKER_RE.test(regionText)) {
+          pctx.unresolved.add(dest);
+        } else {
+          pctx.unresolved.delete(dest);
+        }
+        pctx.stateDirty = true;
+        pctx.row(dest, 'merged', 'applied provided content (disposition: accepted)');
+      } else { // 'kit': splice the kit block inside markers
+        const srcAbs = path.join(ctx.manifestRoot, region.src);
+        if (!fs.existsSync(srcAbs)) throw new Error(`no kit region source: ${region.src}`);
+        const blockRaw = fs.readFileSync(srcAbs, 'utf8');
+        const block = blockRaw.replace(/\r?\n$/, ''); // match splice normalization
+        const merged = hasMarkers
+          ? spliceRegion(local, rk.regionId, block)
+          : injectRegion(local, rk.regionId, block);
+        if (merged === null) throw new Error(`marker splice failed: ${fileDest}`);
+        pctx.writeFile(destAbs, merged);
+        pctx.artifacts[dest] = {
+          ...(pctx.artifacts[dest] || {}),
+          hash: sha256(blockRaw), source: region.src,
+          syncedAt: pctx.now, kitCommit: ctx.kitCommit, region: true,
+        };
+        pctx.unresolved.delete(dest);
+        pctx.stateDirty = true;
+        pctx.row(dest, 'fast-forward', 'applied kit region (disposition: kit)');
+      }
+    }
+    if (pctx.stateDirty) persistSyncState(pctx);
+    const conflict = pr.files.some(f => f.artifact === dest && f.action === 'conflict');
+    return { dest, disposition, changed: true, conflict, rows: pr.files };
+  }
+
 
   if (disposition === 'reverted') {
     return { dest, disposition, changed: false, conflict: false, rows: [] };

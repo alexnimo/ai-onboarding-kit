@@ -14,6 +14,7 @@
   --conflict-fg: #82071e;
   --conflict-bg: #ffebe9;
   --warn-fg: #6e4a00;
+  --warn-bg: #fff8c5;
   --neutral-fg: #424a53;
   --neutral-bg: #eaeef2;
   --add-fg: #0f5323;
@@ -40,6 +41,7 @@
     --conflict-fg: #ff7b72;
     --conflict-bg: #3c0d12;
     --warn-fg: #e3b341;
+    --warn-bg: #3b2d00;
     --neutral-fg: #c9d1d9;
     --neutral-bg: #262c36;
     --add-fg: #aff5b4;
@@ -78,8 +80,13 @@ a { color: var(--accent); }
   background: var(--accent); color: var(--accent-fg);
 }
 
-.site-header { border-bottom: 1px solid var(--border); padding: 0.75rem 1rem; }
+.site-header { border-bottom: 1px solid var(--border); padding: 0.75rem 1rem;
+  display: flex; align-items: baseline; gap: 1.5rem; }
 .brand { font-weight: 600; color: var(--fg); text-decoration: none; }
+.site-nav { display: flex; gap: 1rem; }
+.site-nav a { color: var(--fg); }
+fieldset { border: 1px solid var(--border); border-radius: 0.5rem; margin: 0.5rem 0; }
+fieldset label { display: inline-block; margin: 0.25rem 0.75rem 0.25rem 0; }
 main { max-width: 60rem; margin: 0 auto; padding: 1rem; }
 .muted, .empty, .note { color: var(--muted); }
 .note { font-size: 0.9rem; }
@@ -139,6 +146,7 @@ button:disabled, [aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
 .badge-ok { color: var(--ok-fg); background: var(--ok-bg); }
 .badge-conflict { color: var(--conflict-fg); background: var(--conflict-bg); }
 .badge-neutral { color: var(--neutral-fg); background: var(--neutral-bg); }
+.badge-warn { color: var(--warn-fg); background: var(--warn-bg); }
 .chips { list-style: none; display: flex; flex-wrap: wrap; gap: 0.4rem; padding: 0; margin: 0.75rem 0; }
 
 /* Dashboard cards */
@@ -158,6 +166,19 @@ button:disabled, [aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
 .row-blocked td { background: var(--blocked-bg); }
 .details-row > td { background: var(--surface); }
 .details { display: grid; gap: 0.5rem; padding: 0.25rem 0; }
+
+/* Overview: kit strip, doctor panel, file lists */
+.kit-strip { margin: 0.25rem 0; font-size: 0.9rem; }
+.file-list { list-style: none; padding: 0; margin: 0; }
+.file-list li { margin: 0.15rem 0; }
+.category-row td { background: var(--surface); border-bottom: 1px solid var(--border); }
+.cmd-output { font-size: 0.85rem; white-space: pre-wrap; max-height: 12rem; overflow: auto;
+  margin: 0.25rem 0 0; padding: 0.4rem; border: 1px solid var(--border); border-radius: 0.4rem;
+  background: var(--surface); }
+
+/* Sync disposition legend */
+.disp-legend { margin: 0.5rem 0; padding: 0.5rem 0.75rem; border: 1px solid var(--border);
+  border-radius: 0.4rem; background: var(--surface); font-size: 0.9rem; }
 
 /* Diff viewer */
 .diff {

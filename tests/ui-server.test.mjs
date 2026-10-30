@@ -47,18 +47,37 @@ const MANIFEST = {
   directories: ['.agents'],
   templates: [{ src: 'templates/AGENTS.md.tmpl', dest: 'AGENTS.md', overwrite: false }],
   rules: [{ src: 'templates/rules/dev-env.md.tmpl', dest: 'dev-env.md', overwrite: false }],
-  skills: [],
+  skills: [{ name: 'browser-testing', required: false }],
   templateSkills: [],
-  cliTools: [],
+  cliTools: [{ name: 'skillui', required: false }],
   placeholders: [{ key: 'PROJECT_NAME' }],
-  mcpServers: [],
+  mcpServers: [
+    { name: 'semble', required: true, tier: 'core',
+      config: { command: 'npx', args: ['-y', '@semblemcp/server'] } },
+    { name: 'chrome-devtools', required: false, tier: 'specialist',
+      config: { command: 'npx', args: ['-y', 'chrome-devtools-mcp@latest'] } },
+  ],
   hooks: [],
+  profiles: [{
+    id: 'qa-agent', label: 'QA', description: 'Browser QA.',
+    skills: ['browser-testing'], mcpServers: ['chrome-devtools'],
+    harnesses: ['devin'],
+  }],
   agentProfiles: {
     devin: {
       instructionsFile: 'AGENTS.md',
       rulesDir: '.windsurf/rules',
       rulesEnabled: true,
       skillDirs: ['~/.agents/skills'],
+      specialist: {
+        kind: 'local-config+agents',
+        agentsDir: '.devin/agents',
+        localConfigPath: '.devin/mcp_config.local.json',
+        serversDisabled: true,
+      },
+    },
+    omp: {
+      specialist: { kind: 'profiles', profileDir: '~/.omp/profiles/<id>/agent' },
     },
   },
 };
@@ -135,7 +154,11 @@ before(async () => {
   git(['init', '-q', '-b', 'main']);
   commitKit();
   uiMod = await import(UI_SERVER);
-  ({ server } = await uiMod.startUiServer({ port: 0 }));
+  ({ server } = await uiMod.startUiServer({
+    port: 0,
+    home: HOME_DIR,
+    profilesStatePath: path.join(KIT, 'profiles.user.json'),
+  }));
   base = `http://127.0.0.1:${server.address().port}`;
 });
 
@@ -528,4 +551,119 @@ test('F3: session plan store is bounded (cap + TTL)', async () => {
   } finally {
     await new Promise(r => srv2.close(r));
   }
+});
+
+// Profiles: GET /api/profiles returns effective kit profiles plus the
+// manifest catalog (skills / cliTools / mcpServers / harnesses).
+test('profiles: GET /api/profiles list shape + catalog', async () => {
+  const { status, body } = await api('GET', '/api/profiles');
+  assert.equal(status, 200);
+  const qa = body.profiles.find(p => p.id === 'qa-agent');
+  assert.ok(qa, 'kit profile listed');
+  assert.equal(qa.origin, 'kit');
+  assert.deepEqual(qa.harnesses, ['devin']);
+  assert.deepEqual(qa.skills.map(s => s.name), ['browser-testing']);
+  assert.equal(typeof qa.invoke.devin, 'string');
+  assert.deepEqual(body.catalog.skills, ['browser-testing']);
+  assert.deepEqual(body.catalog.cliTools, ['skillui']);
+  assert.deepEqual(
+    body.catalog.mcpServers.map(s => s.name).sort(),
+    ['chrome-devtools', 'semble']);
+  assert.ok(body.catalog.harnesses.includes('omp'));
+});
+
+// Profiles: create -> plan -> sync -> delete round-trip writes artifacts
+// into the tmp project (project scope) and tmp home (user scope), records
+// them in the redirected state file, and removes them on delete.
+test('profiles: create/plan/sync/delete round-trip writes tmp files', async () => {
+  const proj = path.join(PROJ_DIR, 'prof-proj');
+  fs.mkdirSync(proj, { recursive: true });
+
+  const bad = await api('POST', '/api/profiles', { id: 'Bad_Id!' });
+  assert.equal(bad.status, 400);
+
+  const created = await api('POST', '/api/profiles', {
+    id: 'ui-prof', label: 'UI prof',
+    mcpServers: ['chrome-devtools'], harnesses: ['devin', 'omp'],
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.profile.origin, 'user');
+
+  const dup = await api('POST', '/api/profiles', { id: 'ui-prof' });
+  assert.equal(dup.status, 409);
+
+  const plan = await api('GET',
+    `/api/profiles/ui-prof/plan?project=${encodeURIComponent(proj)}`);
+  assert.equal(plan.status, 200);
+  assert.ok(plan.body.artifacts.some(
+    a => a.harness === 'devin' && a.dest === '.devin/mcp_config.local.json'));
+  assert.ok(plan.body.artifacts.some(
+    a => a.harness === 'omp' && a.scope === 'user'));
+  assert.equal(typeof plan.body.invoke.devin, 'string');
+
+  const sync = await api('POST', '/api/profiles/ui-prof/sync',
+    { project: proj });
+  assert.equal(sync.status, 200);
+  assert.deepEqual(
+    sync.body.skills.map(s => s.name), [],
+    'profile has no skills');
+  const dests = sync.body.results.map(r => `${r.action}:${r.dest}`);
+  assert.ok(dests.some(d => d.endsWith('.devin/mcp_config.local.json')));
+  assert.ok(fs.existsSync(path.join(proj, '.devin/agents/ui-prof.md')),
+    'project-scope agent file written');
+  assert.ok(fs.existsSync(
+    path.join(HOME_DIR, '.omp/profiles/ui-prof/agent/AGENTS.md')),
+    'user-scope omp profile written into tmp home');
+  const state = JSON.parse(fs.readFileSync(
+    path.join(KIT, 'profiles.user.json'), 'utf8'));
+  assert.ok(state.profiles['ui-prof'], 'user profile persisted');
+  assert.ok(Object.keys(state.artifacts).some(k => k.startsWith('ui-prof:')),
+    'artifact hashes recorded');
+
+  const del = await api('DELETE', '/api/profiles/ui-prof');
+  assert.equal(del.status, 200);
+  assert.equal(del.body.kitProfile, false);
+  assert.ok(del.body.removed.some(r => r.action === 'deleted'));
+  assert.ok(!fs.existsSync(path.join(proj, '.devin/agents/ui-prof.md')));
+});
+
+// Profiles: PUT on a kit profile writes overrides (disabled hides it from
+// the effective list; disabled:false restores it).
+test('profiles: PUT kit override disables and re-enables', async () => {
+  const off = await api('PUT', '/api/profiles/qa-agent', { disabled: true });
+  assert.equal(off.status, 200);
+  assert.equal(off.body.profile, null, 'disabled profile excluded');
+  const list1 = await api('GET', '/api/profiles');
+  assert.ok(!list1.body.profiles.some(p => p.id === 'qa-agent'));
+
+  const on = await api('PUT', '/api/profiles/qa-agent',
+    { disabled: false, description: 'overridden' });
+  assert.equal(on.status, 200);
+  assert.equal(on.body.profile.description, 'overridden');
+  const list2 = await api('GET', '/api/profiles');
+  assert.equal(
+    list2.body.profiles.find(p => p.id === 'qa-agent').description,
+    'overridden');
+
+  const del = await api('DELETE', '/api/profiles/qa-agent');
+  assert.equal(del.body.kitProfile, true,
+    'kit definition survives delete (override + artifacts removed)');
+  const list3 = await api('GET', '/api/profiles');
+  assert.equal(
+    list3.body.profiles.find(p => p.id === 'qa-agent').description,
+    'Browser QA.',
+    'kit profile back to manifest definition');
+});
+
+// Profiles: unknown ids and catalog validation are clean 4xxs.
+test('profiles: unknown id 404; bad harness/mcp 400', async () => {
+  assert.equal((await api('GET', '/api/profiles/nope/plan')).status, 404);
+  assert.equal((await api('PUT', '/api/profiles/nope', {})).status, 404);
+  assert.equal((await api('DELETE', '/api/profiles/nope')).status, 404);
+  const badHarness = await api('POST', '/api/profiles',
+    { id: 'x-bad', harnesses: ['not-a-harness'] });
+  assert.equal(badHarness.status, 400);
+  const badMcp = await api('POST', '/api/profiles',
+    { id: 'x-bad', mcpServers: ['not-a-server'] });
+  assert.equal(badMcp.status, 400);
 });

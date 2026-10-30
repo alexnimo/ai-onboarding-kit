@@ -14,7 +14,7 @@ import {
   countByAction, resultCounts, describeLastResult,
 } from '../model.mjs';
 
-const DISP_LABELS = [['accepted', 'Accept'], ['reverted', 'Revert'], ['kit', 'Kit']];
+const DISP_LABELS = [['accepted', 'Use merged'], ['reverted', 'Keep mine'], ['kit', 'Use kit']];
 const ACTION_LABEL = {
   'fast-forward': 'Fast-forward', merged: 'Merged', conflict: 'Conflict',
   skip: 'Skip', retired: 'Retired',
@@ -129,6 +129,14 @@ export function renderSync(projectPath) {
     }
 
     if (state.files.length) {
+      nodes.push(el('div', { class: 'disp-legend' },
+        el('strong', {}, 'Dispositions: '),
+        el('span', {}, 'Use merged', ' = write the merged result (may contain conflict markers you must resolve). '),
+        el('span', {}, 'Keep mine', ' = keep the project file as-is. '),
+        el('span', {}, 'Use kit', " = overwrite with the kit's version.")));
+    }
+
+    if (state.files.length) {
       nodes.push(el('table', { class: 'classify' },
         el('caption', { class: 'sr-only' }, 'Planned changes for this project'),
         el('thead', {}, el('tr', {},
@@ -142,7 +150,7 @@ export function renderSync(projectPath) {
     const tally = tallyDispositions(state.files, state.disp);
     nodes.push(el('div', { class: 'apply-bar' },
       el('p', { class: 'tally', role: 'status' },
-        `Accept ${tally.accepted} · Revert ${tally.reverted} · Kit ${tally.kit} of ${tally.total} file(s)`),
+        `Use merged ${tally.accepted} · Keep mine ${tally.reverted} · Use kit ${tally.kit} of ${tally.total} file(s)`),
       el('button', {
         type: 'button', class: 'button primary',
         'aria-disabled': String(!gate.ok || state.busy),
@@ -213,9 +221,8 @@ export function renderSync(projectPath) {
           dataset: { key: `disp:${file.dest}:${disp}` },
           onclick: () => choose(file.dest, disp, `disp:${file.dest}:${disp}`),
         }, label))),
-      file.action === 'conflict'
-        ? el('p', { class: 'hint' },
-          'Accept = merged result (may contain conflict markers). Revert = keep project file. Kit = take kit file.')
+      file.action === 'conflict' && !current
+        ? el('p', { class: 'hint' }, 'Pick one - see the legend above.')
         : null);
   }
 
@@ -345,7 +352,7 @@ export function renderSync(projectPath) {
     return el('div', { class: `toast toast-${failures.length ? 'error' : 'ok'}`, role: 'status' },
       el('div', {},
         el('p', {},
-          `Applied: ${counts.accepted} accepted, ${counts.reverted} reverted, ${counts.kit} kit`
+          `Applied: ${counts.accepted} use merged, ${counts.reverted} keep mine, ${counts.kit} use kit`
           + (counts.failed ? `, ${counts.failed} failed` : '') + '.'),
         failures.length
           ? el('ul', {}, failures.map(f => el('li', {}, `${f.dest}: ${f.error}`)))

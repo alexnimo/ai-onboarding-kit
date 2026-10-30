@@ -27,7 +27,195 @@ import {
   getPath,
   setPath,
   groupHooksByEvent,
+  extractRegion,
+  spliceRegion,
+  injectRegion,
 } from './sync-utils.mjs';
+/**
+ * Sync one kit-managed region inside a project-owned file.
+ *
+ * Region semantics (markers `<!-- BEGIN/END ai-onboarding-kit:<id> -->`):
+ *   file absent                       -> create via template render, region rec
+ *   markers absent + no rec           -> inject block; file stays foreign
+ *   markers absent + rec.removed      -> 'project-only' (removal respected)
+ *   markers absent + rec + --force    -> re-inject
+ *   markers present + no rec          -> adopt local region (base = kit)
+ *   regionLocal == base               -> fast-forward (splice kit text)
+ *   regionKit   == base               -> 'project-only' (local edits kept)
+ *   both changed                      -> merge3 on region text only, splice
+ *   conflict markers inside region    -> 'conflict' + unresolved[dest:id]
+ *
+ * Everything outside the markers is never read/written. Legacy whole-file
+ * artifacts[dest] records migrate to the region record (B3).
+ *
+ * @param {object} pctx Project sync context.
+ * @param {string} dest Project-relative dest path.
+ * @param {object} region {id, src} from plan.regionDests.
+ */
+export function syncRegionDest(pctx, dest, region) {
+  const { ctx, projectRoot, artifacts, row, skipSet, pins } = pctx;
+  const key = `${dest}:${region.id}`;
+  const rec = artifacts[key];
+  const destAbs = path.join(projectRoot, dest);
+  const srcAbs = path.join(ctx.manifestRoot, region.src);
+  const srcText = fs.existsSync(srcAbs) ? fs.readFileSync(srcAbs, 'utf8') : null;
+  // Region text on disk has no trailing newline (it sits between marker
+  // lines); the block source file ends with one. Normalize once so
+  // equality classification, splices, and merges compare like with like.
+  const kitBlock = srcText === null ? null : srcText.replace(/\r?\n$/, '');
+  const srcHash = srcText !== null ? sha256(srcText) : null; // raw bytes: reconstructBase verifies file hashes
+
+  if (pins[key] !== undefined) { row(key, 'skip', `pinned: ${pins[key]}`); return; }
+  if (pins[dest] !== undefined) { row(key, 'skip', `pinned: ${pins[dest]}`); return; }
+  if (skipSet.has(key) || skipSet.has(dest)) { row(key, 'skip', 'exempt: overrides.skip'); return; }
+  if (kitBlock === null) { row(key, 'skip', 'kit region source missing'); return; }
+
+  // Legacy whole-file record on a region-managed dest migrates here (B3):
+  // the template-installed kit sections are now region-managed; the rest
+  // of the file becomes project text.
+  if (artifacts[dest] && !artifacts[dest].region) {
+    delete artifacts[dest];
+    pctx.stateDirty = true;
+    row(key, 'migrated', 'whole-file record dropped; region now managed');
+  }
+
+  const exists = fs.existsSync(destAbs);
+  const localText = exists ? fs.readFileSync(destAbs, 'utf8') : null;
+  const localRegion = exists ? extractRegion(localText, region.id) : null;
+
+  // Fresh install through the region pass: render the template (it ships
+  // markers + {{KIT_REGION}}) and record the region, never the file.
+  if (!exists) {
+    const tmpl = ctx.plan.textDests.get(dest);
+    if (!tmpl) { row(key, 'skip', 'file absent and no template dest'); return; }
+    const tmplAbs = path.join(ctx.manifestRoot, tmpl.src);
+    if (!fs.existsSync(tmplAbs)) { row(key, 'skip', 'kit source missing'); return; }
+    const text = expandKitRegions(
+      renderTemplate(fs.readFileSync(tmplAbs, 'utf8'), pctx.placeholders), ctx);
+    pctx.writeFile(destAbs, text);
+    artifacts[key] = { hash: srcHash, source: region.src, syncedAt: pctx.now, kitCommit: ctx.kitCommit, region: true };
+    pctx.stateDirty = true;
+    pctx.unresolved.delete(key);
+    row(key, 'fast-forward', needsFillSuffix('new managed file', text));
+    return;
+  }
+
+  if (localRegion === null) {
+    if (rec?.removed && !ctx.force) {
+      row(key, 'project-only', 'region removed by project (removal respected; --force re-injects)');
+      return;
+    }
+    const injected = injectRegion(localText, region.id, kitBlock);
+    pctx.writeFile(destAbs, injected);
+    artifacts[key] = { hash: srcHash, source: region.src, syncedAt: pctx.now, kitCommit: ctx.kitCommit, region: true };
+    pctx.stateDirty = true;
+    row(key, 'injected', 'kit region added after first heading (file stays project-owned)');
+    return;
+  }
+
+  // Lingering markers inside the region are a live conflict (project text
+  // outside the region is NOT scanned - false-positive guard).
+  if (CONFLICT_MARKER_RE.test(localRegion)) {
+    row(key, 'conflict', 'unresolved conflict markers in region (resolve, then re-run sync)');
+    pctx.unresolved.add(key); pctx.stateDirty = true;
+    return;
+  }
+
+  if (localRegion === kitBlock) {
+    // Converged (identical or both unchanged) - refresh record if needed.
+    if (!rec || rec.hash !== srcHash || rec.removed) {
+      artifacts[key] = { hash: srcHash, source: region.src, syncedAt: pctx.now, kitCommit: ctx.kitCommit, region: true };
+      pctx.stateDirty = true;
+    }
+    pctx.unresolved.delete(key);
+    return;
+  }
+
+  if (!rec || rec.removed) {
+    // Markers present but no usable record: adopt the local region as
+    // local edits over the current kit base (merge3 identity keeps it).
+    const merged = spliceRegion(localText, region.id, localRegion);
+    if (merged !== null && merged !== localText) pctx.writeFile(destAbs, merged);
+    artifacts[key] = { hash: srcHash, source: region.src, syncedAt: pctx.now, kitCommit: ctx.kitCommit, region: true };
+    pctx.stateDirty = true;
+    row(key, 'project-only', 'region adopted as project content (base = current kit)');
+    return;
+  }
+
+  const baseText = reconstructBase(rec, srcAbs, pctx.state.kitCommit, ctx.manifestRoot);
+  const base = baseText !== null ? (extractRegion(baseText, region.id) ?? baseText.replace(/\r?\n$/, '')) : null;
+  // Base reconstruction yields the region SOURCE file (already just the
+  // block) or the legacy full-file text - accept both, extracting when
+  // markers are present.
+  if (base === null) {
+    row(key, 'skip', 'recorded base unreconstructable; kept local');
+    return;
+  }
+  if (localRegion === base) {
+    const merged = spliceRegion(localText, region.id, kitBlock);
+    if (merged === null) { row(key, 'skip', 'marker splice failed; kept local'); return; }
+    pctx.writeFile(destAbs, merged);
+    rec.hash = srcHash; rec.kitCommit = ctx.kitCommit; rec.syncedAt = pctx.now;
+    pctx.stateDirty = true; pctx.unresolved.delete(key);
+    row(key, 'fast-forward', 'applied kit region update');
+    return;
+  }
+  if (kitBlock === base) {
+    row(key, 'project-only', 'kit unchanged; local region edits kept');
+    return;
+  }
+  // Both sides changed -> three-way merge on region text only.
+  const eol = localText.includes('\r\n') ? '\r\n' : '\n';
+  const { text: mergedRegion, conflicts } = merge3(base, localRegion, kitBlock, {
+    ours: 'project',
+    base: `kit base ${String(rec.kitCommit || pctx.state.kitCommit || 'unknown').slice(0, 7)}`,
+    theirs: `kit v${ctx.manifest.version || 'unknown'}`,
+    eol,
+  });
+  rec.hash = srcHash; rec.kitCommit = ctx.kitCommit; rec.syncedAt = pctx.now;
+  pctx.stateDirty = true;
+  if (conflicts === 0 && mergedRegion === localRegion) {
+    if (CONFLICT_MARKER_RE.test(mergedRegion)) {
+      pctx.unresolved.add(key);
+      row(key, 'conflict', 'conflict markers remain in region (resolve manually)');
+      return;
+    }
+    pctx.unresolved.delete(key);
+    row(key, 'project-only', 'region already contains kit changes; kept local');
+    return;
+  }
+  const merged = spliceRegion(localText, region.id, mergedRegion);
+  if (merged === null) { row(key, 'skip', 'marker splice failed; kept local'); return; }
+  pctx.writeFile(destAbs, merged);
+  if (conflicts > 0 || CONFLICT_MARKER_RE.test(mergedRegion)) {
+    pctx.unresolved.add(key);
+    row(key, 'conflict', conflicts > 0
+      ? `${conflicts} conflict region(s) inside kit region - markers written${ctx.dryRun ? ' (dry-run; nothing written)' : ''}`
+      : 'conflict markers remain in region (resolve manually)');
+  } else {
+    pctx.unresolved.delete(key);
+    row(key, 'merged', 'merged kit region update around local edits');
+  }
+}
+
+/**
+ * Expand `{{KIT_REGION}}` directives in a template render: each occurrence
+ * becomes the marker-wrapped block content of the first managedRegion
+ * whose dests cover this template's dest. Templates embed the directive
+ * between markers; expansion is the block source verbatim.
+ *
+ * @param {string} text Rendered template text (may contain {{KIT_REGION}}).
+ * @param {object} ctx Sync context ({manifest, manifestRoot}).
+ * @returns {string}
+ */
+export function expandKitRegions(text, ctx) {
+  return text.replace(/\{\{KIT_REGION\}\}/g, () => {
+    const r = (ctx.manifest.managedRegions || [])[0];
+    if (!r) return '';
+    const abs = path.join(ctx.manifestRoot, r.src);
+    return fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8').replace(/\n$/, '') : '';
+  });
+}
 
 /**
  * Reconstruct the recorded base content for a template artifact: prefer the
@@ -474,6 +662,7 @@ export function prepareConfig(pctx, cfgRel, cfgPlan, rec) {
   if (cfgPlan.mcpKey) {
     const baseServers = new Map((baseManifest?.mcpServers || []).map(s => [s.name, s.config]));
     for (const s of manifest.mcpServers || []) {
+      if (s.tier === 'specialist') continue; // specialist servers go to profile destinations, not main configs
       manifestServers.add(s.name);
       push(`${cfgPlan.mcpKey}.${s.name}`, [cfgPlan.mcpKey, s.name], s.config,
         baseServers.has(s.name) ? baseServers.get(s.name) : undefined, 'mcp', s.name);

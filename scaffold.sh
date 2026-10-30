@@ -25,6 +25,8 @@ INSTALL_SKILLS=false
 UPDATE_SKILLS=false
 CONFIG_ONLY=false
 FORCE=false
+DRY_RUN=false
+ONLY_FILE=""
 MANIFEST_PATH=""
 
 # Parse args
@@ -37,6 +39,8 @@ while [[ $# -gt 0 ]]; do
         --config-only)    CONFIG_ONLY=true; shift ;;
         --force)          FORCE=true; shift ;;
         --manifest)       MANIFEST_PATH="$2"; shift 2 ;;
+        --dry-run)        DRY_RUN=true; shift ;;
+        --only)           ONLY_FILE="$2"; shift 2 ;;
         -h|--help)
             echo "Usage: $0 [--target <dir>] [--agent <name>] [--install-skills] [--update-skills] [--config-only] [--force] [--manifest <path>]"
             echo ""
@@ -80,6 +84,34 @@ if ! jq -e --arg a "$AGENT" '.agentProfiles[$a]' "$MANIFEST_PATH" &>/dev/null; t
     exit 1
 fi
 
+# --- dry-run / --only machinery ---
+# In dry-run mode the script still performs all READS (existence checks,
+# skill detection) so rows reflect reality, but every mutation is replaced
+# by a fact row. Human output moves to stderr; stdout carries the JSON
+# array alone so callers can capture it cleanly.
+ROWS_FILE=""
+emit_row() {
+    # emit_row <artifact> <action> [detail] [global]
+    [[ -z "$ROWS_FILE" ]] && return 0
+    jq -cn --arg a "$1" --arg act "$2" --arg d "${3:-}" --arg g "${4:-false}" \
+        '({artifact:$a, action:$act} + (if $d != "" then {detail:$d} else {} end)
+          + (if $g == "true" then {global:true} else {} end))' >> "$ROWS_FILE"
+}
+allowed() {
+    # allowed <artifact> -> 0 when --only is unset or the artifact (or a
+    # path inside a listed dir) appears in the --only file.
+    [[ -z "$ONLY_FILE" ]] && return 0
+    [[ ! -f "$ONLY_FILE" ]] && return 0
+    grep -qxF "$1" "$ONLY_FILE" && return 0
+    grep -qxF "${1%/*}" "$ONLY_FILE" && return 0
+    return 1
+}
+if [[ "$DRY_RUN" == true ]]; then
+    ROWS_FILE="$(mktemp)"
+    trap 'rm -f "$ROWS_FILE"' EXIT
+    exec 3>&1 1>&2   # human output -> stderr; JSON goes to fd3 at the end
+fi
+
 PROFILE_MCP_PATH=$(jq -r --arg a "$AGENT" '.agentProfiles[$a].mcpConfigPath' "$MANIFEST_PATH")
 
 echo ""
@@ -97,8 +129,13 @@ if [[ "$CONFIG_ONLY" == false ]]; then
     echo "--- Directories ---"
     while IFS= read -r dir; do
         dest_dir="$TARGET/$dir"
+        allowed "$dir" || continue
         if [[ -d "$dest_dir" ]]; then
             echo "  [exists]  $dir"
+            emit_row "$dir" "exists-skip" "directory exists"
+        elif [[ "$DRY_RUN" == true ]]; then
+            echo "  [would create] $dir"
+            emit_row "$dir" "create" "create directory"
         else
             mkdir -p "$dest_dir"
             echo "  [created] $dir"
@@ -126,12 +163,40 @@ if [[ "$CONFIG_ONLY" == false ]]; then
 
         if [[ "$should_overwrite" == false && -f "$dest_path" ]]; then
             echo "  [skip exists] $dest"
+            emit_row "$dest" "exists-skip" "file exists; kit never overwrites it"
             ((++skipped_count))
             continue
         fi
 
+        allowed "$dest" || continue
+        if [[ "$DRY_RUN" == true ]]; then
+            echo "  [would create] $dest"
+            emit_row "$dest" "create" "install template"
+            ((++created_count))
+            continue
+        fi
+
         mkdir -p "$dest_dir"
-        cp "$src_path" "$dest_path"
+        if grep -q '{{KIT_REGION}}' "$src_path" 2>/dev/null; then
+            # Expand the kit-region directive: the block file content lands
+            # between the markers the template already ships.
+            region_src="$TEMPLATE_ROOT/$(jq -r '.managedRegions[0].src // empty' "$MANIFEST_PATH")"
+            if [[ -f "$region_src" ]]; then
+                awk -v blockfile="$region_src" '
+                    /{{KIT_REGION}}/ {
+                        while ((getline line < blockfile) > 0) {
+                            sub(/\r$/, "", line); print line
+                        }
+                        next
+                    }
+                    { print }
+                ' "$src_path" > "$dest_path"
+            else
+                cp "$src_path" "$dest_path"
+            fi
+        else
+            cp "$src_path" "$dest_path"
+        fi
         echo "  [created] $dest"
         ((++created_count))
     done < <(jq -r '.templates[] | [.src, .dest, (.overwrite // false | tostring)] | @tsv' "$MANIFEST_PATH")
@@ -187,10 +252,12 @@ while IFS=$'\t' read -r name source skill required; do
 
     if [[ "$found" == true ]]; then
         echo "  [installed] $name ($tag)"
+        emit_row "$name" "exists-skip" "skill already installed ($tag)" "true"
         ((++installed_count))
         installed_names+=("$name|$source|$skill")
     else
         echo "  [missing]   $name ($tag)"
+        emit_row "$name" "missing-skill" "not installed ($tag): npx skills add ${source}@${skill} -g -y" "true"
         ((++missing_count))
         if [[ "$required" == "true" ]]; then
             missing_required+=("$name|$source|$skill")
@@ -206,6 +273,12 @@ if [[ "$INSTALL_SKILLS" == true && ${#missing_required[@]} -gt 0 ]]; then
     echo "--- Installing Missing Skills ---"
     for entry in "${missing_required[@]}"; do
         IFS='|' read -r name source skill <<< "$entry"
+        allowed "$name" || continue
+        if [[ "$DRY_RUN" == true ]]; then
+            emit_row "$name" "install-skill" "would run: npx skills add ${source}@${skill} -g -y" "true"
+            echo "  [would install] npx skills add ${source}@${skill} -g -y"
+            continue
+        fi
         cmd="npx skills add ${source}@${skill} -g -y"
         echo "  [installing] $cmd"
         if eval "$cmd"; then
@@ -222,6 +295,12 @@ if [[ "$UPDATE_SKILLS" == true && ${#installed_names[@]} -gt 0 ]]; then
     echo "--- Updating Installed Skills ---"
     for entry in "${installed_names[@]}"; do
         IFS='|' read -r name source skill <<< "$entry"
+        allowed "$name" || continue
+        if [[ "$DRY_RUN" == true ]]; then
+            emit_row "$name" "update-skill" "would run: npx skills update ${source}@${skill} -g -y" "true"
+            echo "  [would update] npx skills update ${source}@${skill} -g -y"
+            continue
+        fi
         cmd="npx skills update ${source}@${skill} -g -y"
         echo "  [updating] $name"
         if eval "$cmd"; then
@@ -255,7 +334,16 @@ if [[ "$template_skills_count" -gt 0 ]]; then
 
         if [[ -f "$dest_skill_md" ]]; then
             echo "  [exists] $dest"
+            emit_row "$dest" "exists-skip" "template skill already installed" "true"
             ((++template_skills_skipped))
+            continue
+        fi
+
+        allowed "$dest" || continue
+        if [[ "$DRY_RUN" == true ]]; then
+            echo "  [would copy] $dest -> ~/.agents/skills/$dest"
+            emit_row "$dest" "copy-skill" "copy kit-bundled skill to ~/.agents/skills/" "true"
+            ((++template_skills_copied))
             continue
         fi
 
@@ -285,6 +373,7 @@ if [[ "$cli_tools_count" -gt 0 ]]; then
         else
             tag=$([[ "$required" == "true" ]] && echo "required" || echo "optional")
             echo "  [missing] $name ($tag) - $install"
+            emit_row "$name" "missing-skill" "CLI tool missing ($tag): $install" "true"
             cli_tools_missing+=("$install")
         fi
     done < <(jq -r '.cliTools[] | [.name, (.check // ""), .install, .required] | @tsv' "$MANIFEST_PATH")
@@ -312,14 +401,42 @@ mcp_config_dir="$(dirname "$mcp_config_path")"
 mcp_added=0
 mcp_exists=0
 
-if [[ -f "$mcp_config_path" ]]; then
+if [[ "$DRY_RUN" == true ]]; then
+    # Read-only preview: count manifest servers absent from the config.
+    if [[ -f "$mcp_config_path" ]]; then
+        echo "  [exists] $PROFILE_MCP_PATH"
+    else
+        echo "  [new]    $PROFILE_MCP_PATH"
+    fi
+    mcp_preview_added=()
+    while IFS=$'\t' read -r name required; do
+        if [[ -f "$mcp_config_path" ]] && jq -e --arg n "$name" '.mcpServers[$n]' "$mcp_config_path" &>/dev/null; then
+            echo "  [exists]   $name"
+            ((++mcp_exists))
+        else
+            echo "  [would add] $name"
+            mcp_preview_added+=("$name")
+            ((++mcp_added))
+        fi
+    done < <(jq -r '.mcpServers[] | select(.tier != "specialist") | [.name, (.required | tostring)] | @tsv' "$MANIFEST_PATH")
+    if [[ ${#mcp_preview_added[@]} -gt 0 || ! -f "$mcp_config_path" ]]; then
+        emit_row "$PROFILE_MCP_PATH" "merge-keys" "add ${#mcp_preview_added[@]} server(s): ${mcp_preview_added[*]}"
+    fi
+elif [[ -f "$mcp_config_path" ]]; then
     echo "  [exists] $PROFILE_MCP_PATH"
 else
     echo "  [new]    $PROFILE_MCP_PATH"
-    mkdir -p "$mcp_config_dir"
-    # Start with empty config
-    echo '{"mcpServers":{}}' > "$mcp_config_path"
+    allowed "$PROFILE_MCP_PATH" || { echo "  [skipped by --only] $PROFILE_MCP_PATH"; }
+    allowed "$PROFILE_MCP_PATH" && {
+        mkdir -p "$mcp_config_dir"
+        # Start with empty config
+        echo '{"mcpServers":{}}' > "$mcp_config_path"
+    }
 fi
+
+if [[ "$DRY_RUN" == false ]] && { [[ ! -f "$mcp_config_path" ]] || ! allowed "$PROFILE_MCP_PATH"; }; then
+    : # nothing to merge into when the config file was skipped
+elif [[ "$DRY_RUN" == false ]]; then
 
 # For each MCP server in manifest, check if it already exists
 while IFS=$'\t' read -r name required; do
@@ -336,10 +453,11 @@ while IFS=$'\t' read -r name required; do
         echo "  [added]    $name ($tag)"
         ((++mcp_added))
     fi
-done < <(jq -r '.mcpServers[] | [.name, (.required | tostring)] | @tsv' "$MANIFEST_PATH")
+done < <(jq -r '.mcpServers[] | select(.tier != "specialist") | [.name, (.required | tostring)] | @tsv' "$MANIFEST_PATH")
 
 if [[ $mcp_added -gt 0 ]]; then
     echo "  [written]  $mcp_config_path"
+fi
 fi
 
 # --- 5b. Hooks config (non-destructive merge) ---
@@ -391,8 +509,15 @@ if [[ -n "$PROFILE_HOOKS_PATH" && -n "$PROFILE_HOOKS_FORMAT" ]]; then
         fi
     done <<< "$manifest_hook_events"
 
-    # Write hooks config if we added anything or the file didn't exist
-    if [[ $hooks_added -gt 0 || "$hooks_config_existed" == false ]]; then
+    if [[ "$DRY_RUN" == true ]]; then
+        if [[ $hooks_added -gt 0 || "$hooks_config_existed" == false ]]; then
+            emit_row "$PROFILE_HOOKS_PATH" "merge-keys" "add $hooks_added hook event(s):${hooks_to_add_events:- none}"
+            echo "  [would write] $hooks_config_path"
+        fi
+    elif [[ $hooks_added -gt 0 || "$hooks_config_existed" == false ]]; then
+        if ! allowed "$PROFILE_HOOKS_PATH"; then
+            echo "  [skipped by --only] $PROFILE_HOOKS_PATH"
+        else
         mkdir -p "$hooks_config_dir"
 
         # Build hooks JSON from manifest for events that need adding
@@ -421,6 +546,7 @@ if [[ -n "$PROFILE_HOOKS_PATH" && -n "$PROFILE_HOOKS_FORMAT" ]]; then
         fi
         echo "  [written]  $hooks_config_path"
     fi
+    fi
 else
     echo ""
     echo "--- Hooks: agent '$AGENT' does not support hooks ---"
@@ -437,7 +563,7 @@ if [[ "$PROFILE_RULES_ENABLED" == true && -n "$PROFILE_RULES_DIR" ]]; then
     echo "--- Rules (agent: $AGENT) ---"
 
     rules_dir_path="$TARGET/$PROFILE_RULES_DIR"
-    mkdir -p "$rules_dir_path"
+    [[ "$DRY_RUN" == false ]] && mkdir -p "$rules_dir_path"
 
     while IFS=$'\t' read -r src dest overwrite; do
         src_path="$TEMPLATE_ROOT/$src"
@@ -453,7 +579,16 @@ if [[ "$PROFILE_RULES_ENABLED" == true && -n "$PROFILE_RULES_DIR" ]]; then
 
         if [[ "$should_overwrite" == false && -f "$dest_path" ]]; then
             echo "  [skip exists] $dest"
+            emit_row "$PROFILE_RULES_DIR/$dest" "exists-skip" "rule file exists; not overwritten"
             ((++rules_skipped))
+            continue
+        fi
+
+        allowed "$PROFILE_RULES_DIR/$dest" || continue
+        if [[ "$DRY_RUN" == true ]]; then
+            echo "  [would create] $dest"
+            emit_row "$PROFILE_RULES_DIR/$dest" "create" "install $AGENT rule"
+            ((++rules_copied))
             continue
         fi
 
@@ -518,7 +653,7 @@ if [[ "$CONFIG_ONLY" == true ]]; then
     echo "  Skills are shared globally via ~/.agents/skills/"
     echo "  MCP config written to: $PROFILE_MCP_PATH"
 else
-    echo "  1. Fill {{placeholders}} in generated files (or invoke the Devin onboarding prompt)"
+    echo "  1. Fill {{placeholders}} in generated files (or invoke prompts/onboard-fill.md with your agent runner)"
     echo "  2. Run: npx skills add <source>@<skill> -g -y  for any missing skills"
     echo "  3. Commit the scaffolded files to your repo"
 fi
@@ -537,13 +672,17 @@ echo ""
 # --- 8. Onboarding registry + state (best-effort, requires Node.js) ---
 # Never fails the scaffold: warns and continues when node or the CLI is missing.
 ONBOARD_CLI="$TEMPLATE_ROOT/bin/onboard.mjs"
-if [[ -f "$ONBOARD_CLI" ]]; then
+if [[ -f "$ONBOARD_CLI" && "$DRY_RUN" == false ]]; then
     if command -v node &>/dev/null; then
         # Reason: pwd -W yields native Windows paths under Git bash/MSYS so the
         # registry key matches what node's path.resolve produces; fall back to
         # plain pwd on real POSIX systems where -W doesn't exist.
         TARGET_ABS="$(cd "$TARGET" && { pwd -W 2>/dev/null || pwd; })"
         PROJECT_NAME="$(basename "$TARGET_ABS")"
+        # Foreign instructions files gain the kit region via node (single
+        # implementation of marker injection shared with sync). Runs before
+        # record-state so the region is recorded, not just injected.
+        node "$ONBOARD_CLI" inject-regions --path "$TARGET_ABS" --manifest "$MANIFEST_PATH" --agents "$AGENT" || true
         if ! node "$ONBOARD_CLI" register --name "$PROJECT_NAME" --path "$TARGET_ABS" --agents "$AGENT" \
             || ! node "$ONBOARD_CLI" record-state --path "$TARGET_ABS" --manifest "$MANIFEST_PATH"; then
             echo "WARNING: onboarding registry/state recording failed (non-fatal)." >&2
@@ -551,4 +690,17 @@ if [[ -f "$ONBOARD_CLI" ]]; then
     else
         echo "WARNING: node not found - skipping onboarding registry/state recording." >&2
     fi
+elif [[ "$DRY_RUN" == true ]]; then
+    # Fact rows only - the node-side planner (onboard-plan.mjs) computes the
+    # real injection/merge/register previews with diffs.
+    echo "  [would run] inject-regions + register + record-state"
+    emit_row "(project)" "register" "register project in kit registry (node preview owns the diff)"
+fi
+
+# --- dry-run plan JSON (stdout; human output above went to stderr) ---
+# @@PLAN_JSON@@ sentinel: node callers split on it so any chatter that
+# leaks into stdout can't corrupt the parse.
+if [[ "$DRY_RUN" == true ]]; then
+    echo "@@PLAN_JSON@@" >&3
+    jq -s '.' "$ROWS_FILE" >&3
 fi

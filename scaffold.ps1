@@ -51,8 +51,35 @@ param(
     [switch]$UpdateSkills,
     [switch]$ConfigOnly,
     [switch]$Force,
+    [switch]$DryRun,
+    [string]$OnlyFile = "",
     [string]$ManifestPath = ""
 )
+
+$ErrorActionPreference = "Stop"
+
+# --- dry-run / --only machinery ---
+# Dry run performs all reads (existence + skill detection) so rows reflect
+# reality, but every mutation is replaced by a fact row. Write-Host goes to
+# the console (not stdout), so the JSON array at the end is clean output.
+$script:rows = [System.Collections.ArrayList]::new()
+function Add-Row {
+    param([string]$Artifact, [string]$Action, [string]$Detail = "", [bool]$Global = $false)
+    $row = [ordered]@{ artifact = $Artifact; action = $Action }
+    if ($Detail) { $row.detail = $Detail }
+    if ($Global) { $row.global = $true }
+    [void]$script:rows.Add([PSCustomObject]$row)
+}
+function Test-Allowed {
+    param([string]$Artifact)
+    if (-not $OnlyFile -or -not (Test-Path $OnlyFile)) { return $true }
+    $listed = Get-Content $OnlyFile | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    $norm = $Artifact -replace '\\', '/'
+    if ($listed -contains $norm) { return $true }
+    $parent = Split-Path -Parent $norm
+    if ($parent -and ($listed -contains $parent)) { return $true }
+    return $false
+}
 
 $ErrorActionPreference = "Stop"
 
@@ -69,6 +96,14 @@ if (-not (Test-Path $ManifestPath)) {
 
 $manifest = Get-Content $ManifestPath -Raw | ConvertFrom-Json
 $TemplateRoot = Split-Path -Parent $ManifestPath
+
+# UTF-8 without BOM: PS 5.1's `-Encoding UTF8` prepends a BOM that breaks
+# JSON.parse in bin/lib/* (sync then reports the file as invalid).
+function Write-Utf8NoBom {
+    param([string]$Path, [string]$Text)
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Text, $enc)
+}
 
 # Resolve agent profile
 $profile = $null
@@ -92,8 +127,13 @@ if (-not $ConfigOnly) {
     Write-Host "--- Directories ---" -ForegroundColor Yellow
     foreach ($dir in $manifest.directories) {
         $destDir = Join-Path $Target $dir
+        if (-not (Test-Allowed $dir)) { continue }
         if (Test-Path $destDir) {
             Write-Host "  [exists]  $dir"
+            Add-Row $dir "exists-skip" "directory exists"
+        } elseif ($DryRun) {
+            Write-Host "  [would create] $dir"
+            Add-Row $dir "create" "create directory"
         } else {
             New-Item -ItemType Directory -Path $destDir -Force | Out-Null
             Write-Host "  [created] $dir" -ForegroundColor Green
@@ -118,7 +158,15 @@ if (-not $ConfigOnly) {
         $existedBefore = Test-Path $destPath
         if ((-not $shouldOverwrite) -and $existedBefore) {
             Write-Host "  [skip exists] $($tmpl.dest)"
+            Add-Row $tmpl.dest "exists-skip" "file exists; kit never overwrites it"
             $skippedCount++
+            continue
+        }
+        if (-not (Test-Allowed $tmpl.dest)) { continue }
+        if ($DryRun) {
+            Write-Host "  [would create] $($tmpl.dest)"
+            Add-Row $tmpl.dest "create" "install template"
+            $createdCount++
             continue
         }
 
@@ -126,7 +174,18 @@ if (-not $ConfigOnly) {
             New-Item -ItemType Directory -Path $destDir -Force | Out-Null
         }
 
-        Copy-Item $srcPath $destPath -Force
+        $srcText = Get-Content $srcPath -Raw
+        if ($srcText -match '\{\{KIT_REGION\}\}') {
+            # Expand the kit-region directive: block file content lands
+            # between the markers the template already ships.
+            $regionSrc = $manifest.managedRegions | Select-Object -First 1 | ForEach-Object { $_.src }
+            $regionPath = if ($regionSrc) { Join-Path $TemplateRoot $regionSrc } else { $null }
+            if ($regionPath -and (Test-Path $regionPath)) {
+                $block = (Get-Content $regionPath -Raw) -replace "`r?`n$", ''
+                $srcText = $srcText -replace [regex]::Escape('{{KIT_REGION}}'), [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $block }
+            }
+        }
+        Write-Utf8NoBom -Path $destPath -Text $srcText
         $action = if ($existedBefore) { "overwritten" } else { "created" }
         Write-Host "  [$action] $($tmpl.dest)" -ForegroundColor Green
         $createdCount++
@@ -183,11 +242,13 @@ foreach ($skill in $manifest.skills) {
     $tag = if ($skill.required) { "required" } else { "optional" }
     if ($found) {
         Write-Host "  [installed] $skillName ($tag)" -ForegroundColor DarkGray
+        Add-Row $skillName "exists-skip" "skill already installed ($tag)" $true
         $installedSkills += $skill
     } else {
         $color = if ($skill.required) { "Red" } else { "DarkYellow" }
         Write-Host "  [missing]   $skillName ($tag)" -ForegroundColor $color
         $missingSkills += $skill
+        Add-Row $skillName "missing-skill" "not installed ($tag): npx skills add $($skill.source)@$($skill.skill) -g -y" $true
     }
 }
 
@@ -197,6 +258,12 @@ if ($InstallSkills -and $missingSkills.Count -gt 0) {
     foreach ($skill in $missingSkills) {
         $cmd = "npx skills add $($skill.source)@$($skill.skill) -g -y"
         Write-Host "  [installing] $cmd" -ForegroundColor Cyan
+        if (-not (Test-Allowed $skill.name)) { continue }
+        if ($DryRun) {
+            Write-Host "  [would install] $cmd" -ForegroundColor Cyan
+            Add-Row $skill.name "install-skill" "would run: $cmd" $true
+            continue
+        }
         Invoke-Expression $cmd
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  [done] $($skill.name)" -ForegroundColor Green
@@ -212,6 +279,12 @@ if ($UpdateSkills -and $installedSkills.Count -gt 0) {
     foreach ($skill in $installedSkills) {
         $cmd = "npx skills update $($skill.source)@$($skill.skill) -g -y"
         Write-Host "  [updating] $($skill.name)" -ForegroundColor Cyan
+        if (-not (Test-Allowed $skill.name)) { continue }
+        if ($DryRun) {
+            Write-Host "  [would update] $cmd" -ForegroundColor Cyan
+            Add-Row $skill.name "update-skill" "would run: $cmd" $true
+            continue
+        }
         Invoke-Expression $cmd
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  [done] $($skill.name)" -ForegroundColor Green
@@ -244,10 +317,18 @@ if ($manifest.templateSkills -and $manifest.templateSkills.Count -gt 0) {
 
         if (Test-Path $destSkillMd) {
             Write-Host "  [exists] $($tskill.dest)" -ForegroundColor DarkGray
+            Add-Row $tskill.dest "exists-skip" "template skill already installed" $true
             $templateSkillsSkipped++
             continue
         }
 
+        if (-not (Test-Allowed $tskill.dest)) { continue }
+        if ($DryRun) {
+            Write-Host "  [would copy] $($tskill.dest) -> ~/.agents/skills/$($tskill.dest)" -ForegroundColor Green
+            Add-Row $tskill.dest "copy-skill" "copy kit-bundled skill to ~/.agents/skills/" $true
+            $templateSkillsCopied++
+            continue
+        }
         if (-not (Test-Path $HomeAgents)) {
             New-Item -ItemType Directory -Path $HomeAgents -Force | Out-Null
         }
@@ -283,6 +364,7 @@ if ($manifest.cliTools -and $manifest.cliTools.Count -gt 0) {
         } else {
             $tag = if ($tool.required) { "required" } else { "optional" }
             Write-Host "  [missing] $($tool.name) ($tag) - $($tool.install)" -ForegroundColor DarkYellow
+            Add-Row $tool.name "missing-skill" "CLI tool missing ($tag): $($tool.install)" $true
             $cliToolsMissing += $tool
         }
     }
@@ -335,6 +417,7 @@ $mcpMissing = @()
 $serversToAdd = @()
 
 foreach ($mcp in $manifest.mcpServers) {
+    if ($mcp.tier -eq 'specialist') { continue }  # specialist servers go to profile destinations only
     $mcpName = $mcp.name
     if ($existingNames -contains $mcpName) {
         Write-Host "  [exists]   $mcpName" -ForegroundColor DarkGray
@@ -348,7 +431,10 @@ foreach ($mcp in $manifest.mcpServers) {
 }
 
 # Write MCP config if we added anything or the file didn't exist
-if ($mcpAdded -gt 0 -or -not $configExisted) {
+if ($DryRun -and ($mcpAdded -gt 0 -or -not $configExisted)) {
+    Write-Host "  [would write] $mcpConfigPath" -ForegroundColor Green
+    Add-Row $profile.mcpConfigPath "merge-keys" "add $mcpAdded server(s): $(($serversToAdd | ForEach-Object { $_.name }) -join ', ')"
+} elseif (($mcpAdded -gt 0 -or -not $configExisted) -and (Test-Allowed $profile.mcpConfigPath)) {
     if (-not (Test-Path $mcpConfigDir)) {
         New-Item -ItemType Directory -Path $mcpConfigDir -Force | Out-Null
     }
@@ -368,7 +454,7 @@ if ($mcpAdded -gt 0 -or -not $configExisted) {
         $configObj.mcpServers | Add-Member -NotePropertyName $mcp.name -NotePropertyValue $serverObj
     }
 
-    $configObj | ConvertTo-Json -Depth 10 | Set-Content $mcpConfigPath -Encoding UTF8
+    Write-Utf8NoBom -Path $mcpConfigPath -Text ($configObj | ConvertTo-Json -Depth 10)
     Write-Host "  [written]  $mcpConfigPath" -ForegroundColor Green
 }
 
@@ -431,7 +517,10 @@ if ($profile.hooksConfigPath -and $profile.hooksConfigFormat) {
     }
 
     # Write hooks config if we added anything or the file didn't exist
-    if ($hooksAdded -gt 0 -or -not $hooksConfigExisted) {
+    if ($DryRun -and ($hooksAdded -gt 0 -or -not $hooksConfigExisted)) {
+        Write-Host "  [would write] $hooksConfigPath" -ForegroundColor Green
+        Add-Row $profile.hooksConfigPath "merge-keys" "add $hooksAdded hook event(s): $(($hooksToAdd.Keys) -join ', ')"
+    } elseif (($hooksAdded -gt 0 -or -not $hooksConfigExisted) -and (Test-Allowed $profile.hooksConfigPath)) {
         if (-not (Test-Path $hooksConfigDir)) {
             New-Item -ItemType Directory -Path $hooksConfigDir -Force | Out-Null
         }
@@ -482,13 +571,13 @@ if ($profile.hooksConfigPath -and $profile.hooksConfigFormat) {
                 } else {
                     $configWrapper | Add-Member -NotePropertyName hooks -NotePropertyValue $hooksObj
                 }
-                $configWrapper | ConvertTo-Json -Depth 10 | Set-Content $hooksConfigPath -Encoding UTF8
+                Write-Utf8NoBom -Path $hooksConfigPath -Text ($configWrapper | ConvertTo-Json -Depth 10)
             } else {
-                [PSCustomObject]@{ hooks = $hooksObj } | ConvertTo-Json -Depth 10 | Set-Content $hooksConfigPath -Encoding UTF8
+                Write-Utf8NoBom -Path $hooksConfigPath -Text ([PSCustomObject]@{ hooks = $hooksObj } | ConvertTo-Json -Depth 10)
             }
         } else {
             # Standalone: the hooks object IS the entire file
-            $hooksObj | ConvertTo-Json -Depth 10 | Set-Content $hooksConfigPath -Encoding UTF8
+            Write-Utf8NoBom -Path $hooksConfigPath -Text ($hooksObj | ConvertTo-Json -Depth 10)
         }
         Write-Host "  [written]  $hooksConfigPath" -ForegroundColor Green
     }
@@ -510,7 +599,7 @@ if ($profile.rulesEnabled -and $profile.rulesDir -and $manifest.rules) {
     }
 
     if (-not (Test-Path $rulesDirPath)) {
-        New-Item -ItemType Directory -Path $rulesDirPath -Force | Out-Null
+        if (-not $DryRun) { New-Item -ItemType Directory -Path $rulesDirPath -Force | Out-Null }
     }
 
     foreach ($rule in $manifest.rules) {
@@ -525,10 +614,17 @@ if ($profile.rulesEnabled -and $profile.rulesDir -and $manifest.rules) {
         $shouldOverwrite = $Force -or $rule.overwrite
         if ((-not $shouldOverwrite) -and (Test-Path $destPath)) {
             Write-Host "  [skip exists] $($rule.dest)" -ForegroundColor DarkGray
+            Add-Row "$($profile.rulesDir)/$($rule.dest)" "exists-skip" "rule file exists; not overwritten"
             $rulesSkipped++
             continue
         }
-
+        if (-not (Test-Allowed "$($profile.rulesDir)/$($rule.dest)")) { continue }
+        if ($DryRun) {
+            Write-Host "  [would create] $($rule.dest)" -ForegroundColor Green
+            Add-Row "$($profile.rulesDir)/$($rule.dest)" "create" "install $Agent rule"
+            $rulesCopied++
+            continue
+        }
         Copy-Item $srcPath $destPath -Force
         Write-Host "  [created] $($rule.dest)" -ForegroundColor Green
         $rulesCopied++
@@ -584,7 +680,7 @@ if ($ConfigOnly) {
     Write-Host "  Skills are shared globally via ~/.agents/skills/"
     Write-Host "  MCP config written to: $($profile.mcpConfigPath)"
 } else {
-    Write-Host "  1. Fill {{placeholders}} in generated files (or invoke the Devin onboarding prompt)"
+    Write-Host "  1. Fill {{placeholders}} in generated files (or invoke prompts/onboard-fill.md with your agent runner)"
     Write-Host '  2. Run: npx skills add <source>@<skill> -g -y  for any missing skills'
     Write-Host "  3. Commit the scaffolded files to your repo"
 }
@@ -600,12 +696,16 @@ Write-Host ""
 # --- 8. Onboarding registry + state (best-effort, requires Node.js) ---
 # Never fails the scaffold: warns and continues when node or the CLI is missing.
 $onboardCli = Join-Path $TemplateRoot "bin\onboard.mjs"
-if (Test-Path $onboardCli) {
+if ((Test-Path $onboardCli) -and -not $DryRun) {
     $nodeExe = Get-Command node -ErrorAction SilentlyContinue
     if ($nodeExe) {
         try {
             $resolvedTarget = (Resolve-Path $Target).Path
             $projectName = Split-Path -Leaf $resolvedTarget
+            # Foreign instructions files gain the kit region via node
+            # (shared marker-injection implementation with sync). Runs
+            # before record-state so the region is recorded too.
+            & node $onboardCli inject-regions --path $resolvedTarget --manifest $ManifestPath --agents $Agent | Write-Host
             & node $onboardCli register --name $projectName --path $resolvedTarget --agents $Agent | Write-Host
             if ($LASTEXITCODE -ne 0) { throw "onboard.mjs register exited $LASTEXITCODE" }
             & node $onboardCli record-state --path $resolvedTarget --manifest $ManifestPath | Write-Host
@@ -616,4 +716,16 @@ if (Test-Path $onboardCli) {
     } else {
         Write-Host "WARNING: node not found - skipping onboarding registry/state recording." -ForegroundColor DarkYellow
     }
+}
+elseif ($DryRun) {
+    Write-Host "  [would run] inject-regions + register + record-state" -ForegroundColor DarkGray
+    Add-Row "(project)" "register" "register project in kit registry (node preview owns the diff)"
+}
+
+# --- dry-run plan JSON (stdout; Write-Host output goes to the console on
+# PS5 but can leak into stdout - the @@PLAN_JSON@@ sentinel marks where
+# the real payload begins so node callers can split on it) ---
+if ($DryRun) {
+    "@@PLAN_JSON@@" | Write-Output
+    $script:rows | ConvertTo-Json -Depth 5 | Write-Output
 }

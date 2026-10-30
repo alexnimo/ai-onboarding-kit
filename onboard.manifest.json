@@ -18,6 +18,11 @@
     { "src": "templates/.agents/DEV_WORKFLOW.md.tmpl",           "dest": ".agents/DEV_WORKFLOW.md",           "overwrite": false }
   ],
 
+  "managedRegions": [
+    { "id": "kit-region", "src": "templates/kit-region.AGENTS.md", "dests": ["AGENTS.md"] }
+  ],
+
+
   "skills": [
     { "name": "brainstorming",                    "source": "obra/superpowers",            "skill": "brainstorming",                    "category": "thinking",     "required": true },
     { "name": "grill-me",                         "source": "mattpocock/skills",           "skill": "grill-me",                         "category": "thinking",     "required": true },
@@ -120,6 +125,7 @@
     {
       "name": "semble",
       "required": true,
+      "tier": "core",
       "hint": "Code search — install via MCP config",
       "config": {
         "command": "npx",
@@ -130,6 +136,7 @@
     {
       "name": "code-review-graph",
       "required": true,
+      "tier": "core",
       "hint": "Impact analysis graph — install via MCP config",
       "config": {
         "command": "npx",
@@ -140,12 +147,51 @@
     {
       "name": "chrome-devtools",
       "required": false,
-      "hint": "Browser debugging — install via MCP config",
+      "tier": "specialist",
+      "hint": "Browser debugging/QA — specialist tier, only written into profile destinations (omp profile dirs, scoped agent configs), never into main agent configs",
       "config": {
         "command": "npx",
         "args": ["-y", "chrome-devtools-mcp@latest"],
         "env": {}
       }
+    },
+    {
+      "name": "playwright",
+      "required": false,
+      "tier": "specialist",
+      "hint": "Browser automation/UI testing — specialist tier, only written into profile destinations",
+      "config": {
+        "command": "npx",
+        "args": ["@playwright/mcp@latest"],
+        "env": {}
+      }
+    }
+  ],
+
+  "profiles": [
+    {
+      "id": "design",
+      "label": "Design orchestration",
+      "description": "Designer skills + browser MCP for explore lanes, redesigns, audits. ui-design-orchestrator stays core-only — invoke it explicitly when needed; it is not loaded here.",
+      "skills": ["design-taste-frontend", "minimalist-ui", "high-end-visual-design", "impeccable", "stop-slop", "frontend-ui-engineering", "web-design-guidelines"],
+      "cliTools": ["skillui"],
+      "mcpServers": ["chrome-devtools", "playwright"],
+      "agent": { "file": "templates/agents/design.md.tmpl" },
+      "spawn": { "omp": "omp -p --auto-approve --profile design \"@{PROMPT_FILE}\"" },
+      "harnesses": ["omp", "opencode", "claude-code"],
+      "origin": "kit"
+    },
+    {
+      "id": "qa-agent",
+      "label": "Browser QA & UI testing",
+      "description": "Chrome DevTools + Playwright MCP for UI verification, console/network debugging, perf traces. No design skills — code inspection via core skills only.",
+      "skills": ["browser-testing-with-devtools", "web-design-guidelines"],
+      "cliTools": [],
+      "mcpServers": ["chrome-devtools", "playwright"],
+      "agent": { "file": "templates/agents/qa-agent.md.tmpl" },
+      "spawn": { "omp": "omp -p --auto-approve --profile qa-agent \"@{PROMPT_FILE}\"" },
+      "harnesses": ["omp", "opencode", "claude-code", "devin"],
+      "origin": "kit"
     }
   ],
 
@@ -208,7 +254,13 @@
       "rulesEnabled": true,
       "skillDirs": ["~/.agents/skills"],
       "readConfigFrom": { "cursor": true, "windsurf": true, "claude": true },
-      "notes": "Devin reads AGENTS.md at project root. Project MCP at .devin/config.json (mcpServers key). Hooks at .devin/hooks.v1.json (standalone). Also reads .windsurf/rules/ and .cursor/rules/ via read_config_from. Global MCP at ~/.codeium/windsurf/mcp_config.json (shared with Windsurf)."
+      "specialist": {
+        "kind": "local-config+agents",
+        "agentsDir": ".devin/agents",
+        "localConfigPath": ".devin/mcp_config.local.json",
+        "serversDisabled": true
+      },
+      "notes": "Devin reads AGENTS.md at project root. Project MCP at .devin/config.json (mcpServers key) — NOTE: since Devin v3000.3 the dedicated file is .devin/mcp_config.json (config.json mcpServers auto-migrates); move mcpConfigPath in a follow-up after checking installed versions. Hooks at .devin/hooks.v1.json (standalone). Also reads .windsurf/rules/ and .cursor/rules/ via read_config_from. Global MCP at ~/.codeium/windsurf/mcp_config.json (shared with Windsurf). Specialist servers go to .devin/mcp_config.local.json with disabled:true (user enables per session: devin mcp enable <name> -s local) + agent defs in .devin/agents/."
     },
     "hermes": {
       "instructionsFile": "AGENTS.md",
@@ -219,7 +271,8 @@
       "rulesDir": ".hermes/rules",
       "rulesEnabled": false,
       "skillDirs": ["~/.agents/skills"],
-      "notes": "Hermes reads AGENTS.md. MCP config at .hermes/mcp.json. Hooks at .hermes/hooks.json. Skills from ~/.agents/skills (global, shared)."
+      "notes": "Hermes reads AGENTS.md. MCP config at .hermes/mcp.json. Hooks at .hermes/hooks.json. Skills from ~/.agents/skills (global, shared).",
+      "specialist": { "kind": "core-only" }
     },
     "opencode": {
       "instructionsFile": "AGENTS.md",
@@ -230,10 +283,16 @@
       "rulesDir": ".opencode/rules",
       "rulesEnabled": false,
       "skillDirs": ["~/.agents/skills"],
-      "notes": "opencode reads AGENTS.md. MCP config at .opencode/mcp.json. Hooks at .opencode/hooks.json. Skills from ~/.agents/skills (global, shared)."
+      "specialist": {
+        "kind": "agents+json",
+        "agentsDir": ".opencode/agents",
+        "configPath": "opencode.json"
+      },
+      "notes": "opencode reads AGENTS.md. MCP config at .opencode/mcp.json — NOTE: docs describe opencode.json top-level 'mcp' key (with {type,command[],enabled} entries); the legacy .opencode/mcp.json path may be stale — verify against installed version before migrating. Hooks at .opencode/hooks.json. Skills from ~/.agents/skills (global, shared). Specialist servers are written to opencode.json 'mcp' (correct format) + global tools deny + .opencode/agents/<id>.md enable."
     },
     "claude-code": {
       "instructionsFile": "CLAUDE.md",
+      "instructionsImport": "@AGENTS.md",
       "mcpConfigPath": ".claude/settings.json",
       "mcpConfigKey": "mcpServers",
       "hooksConfigPath": ".claude/settings.json",
@@ -241,10 +300,15 @@
       "rulesDir": ".claude/rules",
       "rulesEnabled": false,
       "skillDirs": ["~/.agents/skills", "~/.claude/skills"],
-      "notes": "Claude Code reads CLAUDE.md. MCP + hooks in .claude/settings.json. Skills from ~/.agents/skills and ~/.claude/skills."
+      "notes": "Claude Code reads CLAUDE.md. MCP + hooks in .claude/settings.json. Skills from ~/.agents/skills and ~/.claude/skills.",
+      "specialist": {
+        "kind": "mcp-config+agents",
+        "agentsDir": ".claude/agents",
+        "mcpConfigPath": ".claude/mcp-<id>.json"
+      }
     },
     "cursor": {
-      "instructionsFile": ".cursorrules",
+      "instructionsFile": "AGENTS.md",
       "mcpConfigPath": ".cursor/mcp.json",
       "mcpConfigKey": "mcpServers",
       "hooksConfigPath": null,
@@ -252,10 +316,11 @@
       "rulesDir": ".cursor/rules",
       "rulesEnabled": true,
       "skillDirs": ["~/.agents/skills"],
-      "notes": "Cursor reads .cursorrules and .cursor/rules/*.md. MCP config at .cursor/mcp.json. No hooks support. Skills from ~/.agents/skills (global)."
+      "notes": "Cursor reads AGENTS.md natively (and .cursor/rules/*.md as complement). MCP config at .cursor/mcp.json. No hooks support. Skills from ~/.agents/skills (global).",
+      "specialist": { "kind": "core-only" }
     },
     "windsurf": {
-      "instructionsFile": ".windsurf/rules",
+      "instructionsFile": "AGENTS.md",
       "mcpConfigPath": ".windsurf/mcp_config.json",
       "mcpConfigKey": "mcpServers",
       "hooksConfigPath": null,
@@ -263,7 +328,8 @@
       "rulesDir": ".windsurf/rules",
       "rulesEnabled": true,
       "skillDirs": ["~/.agents/skills", ".windsurf/skills"],
-      "notes": "Windsurf reads .windsurf/rules/*.md. MCP config at .windsurf/mcp_config.json. No hooks support. Skills from ~/.agents/skills and project .windsurf/skills."
+      "notes": "Windsurf reads AGENTS.md natively (and .windsurf/rules/*.md as complement). MCP config at .windsurf/mcp_config.json. No hooks support. Skills from ~/.agents/skills and project .windsurf/skills.",
+      "specialist": { "kind": "core-only" }
     },
     "omp": {
       "instructionsFile": "AGENTS.md",
@@ -274,7 +340,28 @@
       "rulesDir": ".omp/rules",
       "rulesEnabled": true,
       "skillDirs": ["~/.agents/skills", "~/.omp/agent/skills", ".omp/skills"],
-      "notes": "omp (oh-my-pi) reads AGENTS.md at project root (a .omp/AGENTS.md override takes priority). Project MCP at .omp/mcp.json (mcpServers key). No declarative hooks: omp hooks are trusted TS/JS modules under .omp/hooks/pre|post/ (executable code), so the kit writes no hooks config. Rules are written to .omp/rules/ (kit convention; omp's native sticky-rules file is .omp/RULES.md). Skills discovered one level deep at user ~/.omp/agent/skills and project .omp/skills; ~/.agents/skills is also a compatible location. Caveat: omp auto-imports MCP definitions from other agents' configs (Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Windsurf, VS Code, plugins) and the first definition found wins — an omp+claude-code project must not double-register servers."
+      "notes": "omp (oh-my-pi) reads AGENTS.md at project root (a .omp/AGENTS.md override takes priority). Project MCP at .omp/mcp.json (mcpServers key). No declarative hooks: omp hooks are trusted TS/JS modules under .omp/hooks/pre|post/ (executable code), so the kit writes no hooks config. Rules are written to .omp/rules/ (kit convention; omp's native sticky-rules file is .omp/RULES.md). Skills discovered one level deep at user ~/.omp/agent/skills and project .omp/skills; ~/.agents/skills is also a compatible location. Caveat: omp auto-imports MCP definitions from other agents' configs (Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Windsurf, VS Code, plugins) and the first definition found wins — an omp+claude-code project must not double-register servers. Specialist profiles materialize as ~/.omp/profiles/<id>/agent/{mcp.json,AGENTS.md} invoked via omp --profile <id>; subagent tools: frontmatter CANNOT carry mcp__* patterns (built-ins only).",
+      "specialist": { "kind": "profiles", "profileDir": "~/.omp/profiles/<id>/agent" }
+    }
+  },
+
+  "onboardingAgents": {
+    "devin": {
+      "detect": "devin",
+      "spawn": "devin -p --prompt-file {PROMPT_FILE} --permission-mode yolo --export"
+    },
+    "claude": {
+      "detect": "claude",
+      "spawn": "claude -p {PROMPT_TEXT} --permission-mode bypassPermissions"
+    },
+    "omp": {
+      "detect": "omp",
+      "spawn": "omp -p --auto-approve {PROMPT_FILE_ARG}"
+    },
+    "opencode": {
+      "detect": "opencode",
+      "spawn": "opencode run {PROMPT_TEXT}",
+      "notes": "No verified unattended-approval flag - resolve steps may require interactive opencode."
     }
   }
 }

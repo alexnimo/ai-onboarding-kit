@@ -42,6 +42,7 @@ import { openProject, syncDests, finalizeProject } from './sync-engine.mjs';
 export const ACTIONS = new Set([
   'fast-forward', 'merged', 'conflict', 'skip', 'project-only',
   'unadopted', 'retired', 'adopted',
+  'injected', 'region-removed', 'migrated', // region lifecycle (spec: managed regions)
 ]);
 
 /**
