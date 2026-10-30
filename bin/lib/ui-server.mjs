@@ -564,12 +564,17 @@ export function createUiServer(opts = {}) {
       if (body.name !== undefined && typeof body.name !== 'string') {
         throw httpError(400, 'name must be a string');
       }
-      if (body.agents !== undefined
-          && (!Array.isArray(body.agents)
-              || body.agents.some(a => typeof a !== 'string'))) {
-        throw httpError(400, 'agents must be an array of strings');
-      }
       const agents = [...new Set(body.agents || [])];
+      const valid = new Set(Object.keys(loadManifest().agentProfiles || {}));
+      const bad = agents.filter(a => !valid.has(a));
+      if (bad.length) {
+        throw httpError(400,
+          `unknown agents: ${bad.join(', ')} — valid: ${[...valid].join(', ')}`);
+      }
+      if (!agents.length) {
+        throw httpError(400,
+          'agents is empty — pick at least one harness to onboard for (agents drive which config files are written)');
+      }
       const name = typeof body.name === 'string' && body.name
         ? body.name : null;
       const now = new Date().toISOString();

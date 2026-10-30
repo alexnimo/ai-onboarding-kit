@@ -169,7 +169,7 @@ function registerForm() {
     el('legend', {}, 'Bootstrap agents (harnesses)'),
     el('p', { class: 'muted' }, 'Loading agent detection...'));
   api.onboardAgents().then(r => {
-    runners.push(...(r.harnesses || r.agents || []));
+    runners.push(...(r.harnesses || []));
     agentsFieldset.replaceChildren(
       el('legend', {}, 'Bootstrap agents (harnesses)'),
       ...(runners.length
