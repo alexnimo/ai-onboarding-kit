@@ -176,6 +176,7 @@
       "skills": ["brainstorming", "grill-me", "grill-with-docs", "spec-driven-development", "planning-and-task-breakdown", "test-driven-development", "code-review-and-quality", "debugging-and-error-recovery", "diagnosing-bugs", "using-git-worktrees", "handoff", "documentation-and-adrs", "find-skills", "full-output-enforcement", "excalidraw-diagram-generator", "api-and-interface-design", "security-and-hardening", "performance-optimization", "observability-and-instrumentation", "improve-codebase-architecture"],
       "cliTools": [],
       "mcpServers": [],
+      "alias": "o-core",
       "harnesses": ["omp"],
       "origin": "kit"
     },
@@ -186,7 +187,7 @@
       "skills": ["design-taste-frontend", "minimalist-ui", "high-end-visual-design", "impeccable", "stop-slop", "frontend-ui-engineering", "web-design-guidelines"],
       "cliTools": ["skillui"],
       "mcpServers": ["chrome-devtools", "playwright"],
-      "agent": { "file": "templates/agents/design.md.tmpl" },
+      "alias": "o-design",
       "spawn": { "omp": "omp -p --auto-approve --profile design \"@{PROMPT_FILE}\"" },
       "harnesses": ["omp", "opencode", "claude-code"],
       "origin": "kit"
@@ -196,7 +197,7 @@
       "label": "Browser QA & UI testing",
       "description": "Chrome DevTools + Playwright MCP for UI verification, console/network debugging, perf traces. No design skills — code inspection via core skills only.",
       "skills": ["browser-testing-with-devtools", "web-design-guidelines"],
-      "cliTools": [],
+      "alias": "o-qa",
       "mcpServers": ["chrome-devtools", "playwright"],
       "agent": { "file": "templates/agents/qa-agent.md.tmpl" },
       "spawn": { "omp": "omp -p --auto-approve --profile qa-agent \"@{PROMPT_FILE}\"" },

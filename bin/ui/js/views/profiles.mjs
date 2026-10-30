@@ -447,7 +447,7 @@ export function renderProfiles() {
           })),
         ' ',
         el('span', { class: 'hint' },
-          'opt-in: sync writes ~/.ai-onboarding-kit/aliases/<id>.sh|.ps1 (alias to omp --profile <id>); delete removes them')),
+          'sync writes ~/.ai-onboarding-kit/aliases/<id>.sh|.ps1 and appends a managed source-block to your shell rc (bashrc/zshrc/profile/PS profile) so the alias works with no manual step; delete removes the files')),
       el('fieldset', {},
         el('legend', {}, 'Skills'),
         skills.nodes.length ? skills.nodes : el('p', { class: 'muted' }, 'None in catalog'),

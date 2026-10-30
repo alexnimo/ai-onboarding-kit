@@ -401,7 +401,7 @@ export function invokeStrings(profile) {
  *
  * @returns {Array<{dest:string, action:string}>}
  */
-export function applyProfilePlan(plan, profile, state) {
+export function applyProfilePlan(plan, profile, state, { home = os.homedir() } = {}) {
   const results = [];
   for (const a of plan.artifacts) {
     if (a.absPath.includes('<project>')) {
@@ -436,6 +436,12 @@ export function applyProfilePlan(plan, profile, state) {
       state.artifacts[key] = { hash: sha256(a.content), managed: true };
     }
   }
+  // If any shell-alias artifact was written, make sure the user's rc file
+  // sources the alias dir so the alias is usable without manual setup.
+  if (plan.artifacts.some(a => a.absPath.includes(
+      `${path.sep}.ai-onboarding-kit${path.sep}aliases`))) {
+    results.push(...ensureAliasBlock({ home }));
+  }
   return results;
 }
 
@@ -466,6 +472,71 @@ function mergeTopLevel(absPath, generated, mergeKeys) {
     }
   }
   return { data, changed };
+}
+
+// ---------- shell alias registration ----------
+
+const ALIAS_BLOCK_BEGIN = '# >>> ai-onboarding-kit profile aliases >>>';
+const ALIAS_BLOCK_END = '# <<< ai-onboarding-kit profile aliases <<<';
+
+/**
+ * Ensure a managed block in the user's shell rc file(s) that sources every
+ * `*.sh`/`*.ps1` under `home/.ai-onboarding-kit/aliases/`. Idempotent; the
+ * block is generic so new/removed alias files take effect without edits.
+ *
+ * @param {object} opts {home}
+ * @returns {Array<{dest:string, action:string}>}
+ */
+export function ensureAliasBlock({ home = os.homedir() } = {}) {
+  const results = [];
+
+  // POSIX: source every .sh in the alias dir.
+  const posixBlock = [
+    ALIAS_BLOCK_BEGIN,
+    `for f in "$HOME/.ai-onboarding-kit/aliases/"*.sh; do`,
+    `  [ -f "$f" ] && . "$f"`,
+    `done`,
+    ALIAS_BLOCK_END,
+  ].join('\n');
+  for (const name of ['.bashrc', '.zshrc', '.profile']) {
+    const rc = path.join(home, name);
+    if (!fs.existsSync(rc)) continue;
+    const cur = fs.readFileSync(rc, 'utf8');
+    if (cur.includes(ALIAS_BLOCK_BEGIN)) {
+      results.push({ dest: `~/${name}`, action: 'exists-skip' });
+      continue;
+    }
+    fs.writeFileSync(rc, cur.replace(/\s*$/, '\n') + posixBlock + '\n');
+    results.push({ dest: `~/${name}`, action: 'appended' });
+  }
+
+  // PowerShell: dot-source every .ps1 in the alias dir (PS5+PS7 locations).
+  const psBlock = [
+    ALIAS_BLOCK_BEGIN,
+    `foreach ($f in "$HOME\\.ai-onboarding-kit\\aliases\\*.ps1") { . $f }`,
+    ALIAS_BLOCK_END,
+  ].join('\n');
+  const psTargets = process.platform === 'win32' ? [
+    path.join(home, 'Documents', 'PowerShell', 'Microsoft.PowerShell_profile.ps1'),
+    path.join(home, 'Documents', 'WindowsPowerShell', 'Microsoft.PowerShell_profile.ps1'),
+  ] : [];
+  for (const rc of psTargets) {
+    const parent = path.dirname(rc);
+    if (!fs.existsSync(parent)) continue; // don't create PS dirs for nothing
+    if (fs.existsSync(rc)) {
+      const cur = fs.readFileSync(rc, 'utf8');
+      if (cur.includes(ALIAS_BLOCK_BEGIN)) {
+        results.push({ dest: rc, action: 'exists-skip' });
+        continue;
+      }
+      fs.writeFileSync(rc, cur.replace(/\s*$/, '\n') + psBlock + '\n');
+      results.push({ dest: rc, action: 'appended' });
+    } else {
+      fs.writeFileSync(rc, psBlock + '\n');
+      results.push({ dest: rc, action: 'created' });
+    }
+  }
+  return results;
 }
 
 /**

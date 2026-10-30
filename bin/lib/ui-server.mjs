@@ -838,7 +838,7 @@ export function createUiServer(opts = {}) {
         const projectRoot = body.project
           ? resolveProjectParam(body.project) : null;
         const plan = planProfile(profile, manifest, projectRoot, { home });
-        const results = applyProfilePlan(plan, profile, state);
+        const results = applyProfilePlan(plan, profile, state, { home });
         saveProfilesState(state);
         sendJson(res, 200, {
           skills: skillStatus(profile, { home }),
