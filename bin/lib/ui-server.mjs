@@ -42,7 +42,9 @@
  *   POST   /api/skills/install {name}         npx skills add <src>@<skill>
  *   POST   /api/skills/update {name}          npx skills update <name>
  *   GET    /api/doctor                        per-project health findings
- *   GET    /api/project/detail?path=          agents, configs, skill status
+ *   POST   /api/onboard/converge {planId, runner?}   staged placeholder-fill job
+ *   GET    /api/onboard/jobs/:id                      job status + per-file diffs
+ *   POST   /api/onboard/jobs/:id/cancel|approve|discard
  */
 
 import http from 'node:http';
@@ -50,6 +52,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   STATE_REL_PATH,
@@ -76,7 +79,9 @@ import { getKitCommit } from './common.mjs';
 import { dryRun, mergeFile, applyDisposition } from './sync-engine.mjs';
 
 import { buildOnboardRows, mergeFactRows } from './onboard-plan.mjs';
-import { listRunners, spawnRunner, which } from './agent-spawn.mjs';
+import { listRunners, spawnRunner, spawnRunnerAsync, buildConvergePrompt,
+  capLog, which, stageTree, diffStagedTree, applyStagedFile,
+  placeholdersLeft, rmStaging } from './agent-spawn.mjs';
 export const UI_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)), '..', 'ui');
 
@@ -287,6 +292,107 @@ export function createUiServer(opts = {}) {
       throw httpError(404, `expired onboard plan: ${id}`);
     }
     return plan;
+  };
+
+  // ---------- converge jobs ----------
+  // Async runner spawns for the placeholder fill. The agent NEVER runs
+  // against the project: the tree is staged into a temp dir first, the
+  // job diffs staged-vs-project, and nothing lands on disk until
+  // /approve writes the accepted files (all or a subset).
+  const convergeJobs = new Map();
+
+  const jobView = job => ({
+    id: job.id, planId: job.planId, target: job.target, runner: job.runner,
+    status: job.status, startedAt: job.startedAt, endedAt: job.endedAt,
+    error: job.error, logTail: job.log.slice(-8000),
+    changes: job.changes?.map(c => ({
+      file: c.file, action: c.action,
+      applied: !!job.appliedSet?.has(c.file),
+      diffText: c.diffText,
+    })),
+    placeholdersLeft: job.status !== 'running' ? job.left : undefined,
+  });
+
+  /** Start a converge job for a plan that already applied. */
+  const startConverge = (plan, runnerKey) => {
+    const existing = [...convergeJobs.values()]
+      .find(j => j.planId === plan.id && j.status === 'running');
+    if (existing) throw httpError(409, `converge already running: job ${existing.id}`);
+    let staging;
+    try { staging = stageTree(plan.target); }
+    catch (err) {
+      throw httpError(500, `staging failed: ${err.message}`);
+    }
+    const prompt = buildConvergePrompt({
+      // TARGET is the staging copy: the agent works only on the mirror.
+      target: staging, runner: runnerKey,
+      applied: plan.applied || [],
+    });
+    const job = {
+      id: crypto.randomUUID(), planId: plan.id, target: plan.target,
+      runner: runnerKey, status: 'running', startedAt: new Date().toISOString(),
+      endedAt: null, error: null, log: '', left: undefined, kill: null,
+      staging, changes: null, appliedSet: new Set(),
+    };
+    const res = spawnRunnerAsync(runnerKey, prompt, {
+      cwd: staging,
+      onData: chunk => { job.log = capLog(job.log, chunk); },
+    });
+    if (!res.ok) { rmStaging(staging); throw httpError(400, res.error); }
+    job.kill = res.kill;
+    res.done.then(r => {
+      job.endedAt = new Date().toISOString();
+      try {
+        job.changes = diffStagedTree(staging, plan.target);
+        job.left = placeholdersLeft(staging);
+      } catch (err) {
+        job.status = 'failed';
+        job.error = `diff failed: ${err.message}`;
+        return;
+      }
+      if (r.timedOut) { job.status = 'failed'; job.error = 'runner timed out'; }
+      else if (r.error) { job.status = 'failed'; job.error = r.error; }
+      else if (r.status !== 0) {
+        job.status = 'failed';
+        job.error = `${job.runner} exited ${r.status}`;
+      } else if (job.status === 'running') job.status = 'done';
+      else job.status = 'cancelled';
+    });
+    convergeJobs.set(job.id, job);
+    while (convergeJobs.size > maxPlans) {
+      const oldest = convergeJobs.keys().next().value;
+      if (convergeJobs.get(oldest)?.status === 'running') break;
+      const j = convergeJobs.get(oldest);
+      if (j?.staging) rmStaging(j.staging);
+      convergeJobs.delete(oldest);
+    }
+    return job;
+  };
+
+  /** Write approved staged files into the project. */
+  const approveConverge = (job, files) => {
+    if (!job.staging || !job.changes) {
+      throw httpError(400, 'job has no staged changes to approve');
+    }
+    const valid = new Set(job.changes.filter(c => c.action !== 'deleted')
+      .map(c => c.file));
+    const todo = files ?? job.changes.filter(c => c.action !== 'deleted')
+      .map(c => c.file);
+    for (const f of todo) {
+      if (!valid.has(f)) throw httpError(400, `not a staged change: ${f}`);
+    }
+    const written = [];
+    for (const f of todo) {
+      applyStagedFile(job.staging, job.target, f);
+      job.appliedSet.add(f);
+      written.push(f);
+    }
+    // Everything staged is either applied or deleted-only: close out.
+    if (job.changes.every(c => c.action === 'deleted' || job.appliedSet.has(c.file))) {
+      rmStaging(job.staging);
+      job.staging = null;
+    }
+    return written;
   };
 
   /**
@@ -1334,9 +1440,12 @@ export function createUiServer(opts = {}) {
         }
         const files = body.accepted.filter(a => a !== '(project)');
         const result = await scaffoldApply(plan.target, plan.profile, files, plan.installSkills);
+        if (result.ok) plan.applied = body.accepted;
         sendJson(res, result.ok ? 200 : 500, {
           ok: result.ok,
           applied: body.accepted,
+          // Converge: which runners can fill placeholders right now.
+          convergeRunners: result.ok ? listRunners().filter(r => r.available) : [],
           error: result.error || null,
         });
         return;
@@ -1379,12 +1488,66 @@ export function createUiServer(opts = {}) {
       throw httpError(405, 'method not allowed');
     }
 
+    // POST /api/onboard/converge {planId, runner?} - start the async
+    // placeholder-fill job for a plan that already applied. The runner
+    // edits the project's generated files directly (unattended), so this
+    // is a background job the UI polls, not a request/response.
+    if (method === 'POST' && pathname === '/api/onboard/converge') {
+      const body = await readJsonBody(req);
+      const plan = getOnboardPlan(body.planId);
+      if (!Array.isArray(plan.applied)) {
+        throw httpError(400, 'plan has not been applied - apply first, then converge');
+      }
+      const runnerKey = body.runner || plan.resolveWith || plan.agent;
+      const job = startConverge(plan, runnerKey);
+      sendJson(res, 202, jobView(job));
+      return;
+    }
+
+    // /api/onboard/jobs/:id[/cancel|/approve|/discard]
+    const jobMatch = /^\/api\/onboard\/jobs\/([^/]+)(\/(cancel|approve|discard))?$/.exec(pathname);
+    if (jobMatch) {
+      const job = convergeJobs.get(jobMatch[1]);
+      if (!job) throw httpError(404, `unknown job: ${jobMatch[1]}`);
+      const action = jobMatch[3];
+      if (action === 'cancel') {
+        if (method !== 'POST') throw httpError(405, 'method not allowed');
+        if (job.status === 'running') { job.status = 'cancelled'; job.kill?.(); }
+        sendJson(res, 200, jobView(job));
+        return;
+      }
+      if (action === 'approve') {
+        if (method !== 'POST') throw httpError(405, 'method not allowed');
+        const body = await readJsonBody(req);
+        if (body.files !== undefined && !Array.isArray(body.files)) {
+          throw httpError(400, 'files must be an array of staged paths (omit for all)');
+        }
+        const written = approveConverge(job, body.files);
+        sendJson(res, 200, { ok: true, written, job: jobView(job) });
+        return;
+      }
+      if (action === 'discard') {
+        if (method !== 'POST') throw httpError(405, 'method not allowed');
+        if (job.status === 'running') job.kill?.();
+        if (job.staging) { rmStaging(job.staging); job.staging = null; }
+        job.status = 'discarded';
+        job.endedAt = job.endedAt || new Date().toISOString();
+        sendJson(res, 200, jobView(job));
+        return;
+      }
+      if (method !== 'GET') throw httpError(405, 'method not allowed');
+      sendJson(res, 200, jobView(job));
+      return;
+    }
+
 
     if (pathname === '/api/projects' || pathname === '/api/history'
         || pathname === '/api/dry-run' || pathname === '/api/onboard/agents'
         || pathname.startsWith('/api/profiles')
         || pathname.startsWith('/api/plans/')
-        || pathname.startsWith('/api/onboard/plans')) {
+        || pathname.startsWith('/api/onboard/plans')
+        || pathname === '/api/onboard/converge'
+        || pathname.startsWith('/api/onboard/jobs/')) {
       throw httpError(405, 'method not allowed');
     }
     throw httpError(404, 'not found');

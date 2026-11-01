@@ -64,8 +64,9 @@ In the review page:
 2. Expand a row to see the diff against what's on disk.
 3. Rows flagged `merge-keys` or `inject-region` (config merges into files you already own) offer **Resolve with agent** — the chosen runner CLI rewrites the merge, and the result is applied instead of the raw diff.
 4. Press **Apply**. Only accepted artifacts are written (via the scaffold's `--only` allowlist), the project is registered, and its install-state is recorded.
+5. Press **Converge with agent** — the onboarding agent runs unattended **in a staged copy** of the project (nothing is written). When it finishes you get a per-file diff table: approve all or a selected subset to write those files into the project, or discard. Only content **outside** `<!-- BEGIN/END ai-onboarding-kit:* -->` markers is touched; the kit-managed region stays sync-owned. Poll shows status, remaining placeholders, and the agent log.
 
-Then fill the `{{placeholders}}`: open your agent runner **in the onboarded project** and paste `prompts/onboard-fill.md` (see *Fill* below).
+You can also start onboarding from the dashboard: **#/** → *Onboard a project* (target path, harness profile, converge runner, skills).
 
 Useful flags for this command:
 
@@ -77,6 +78,8 @@ Useful flags for this command:
 | `--install-skills` / `--update-skills` | Include skill install/update rows in the plan |
 | `--json` | Print `{plan, summary}` and exit — writes nothing, no server |
 | `--apply` | Skip review, apply the whole plan (CI/scripting) |
+| `--converge [--converge-with <runner>]` | After `--apply`, run the agent in a staged copy, print the diff, then write all changed files (non-interactive — use the UI for per-file approval) |
+| `--converge-dry` | Same but preview only: prints the diff, writes nothing |
 
 ```bash
 node bin/onboard.mjs onboard --target <path> --profile devin --json    # plan only
@@ -94,7 +97,7 @@ The server binds loopback only, rejects foreign `Host`/`Origin` headers, and req
 
 ### Fill the placeholders
 
-After the scaffold phase, generated files carry `{{PLACEHOLDER}}` keys. Fill them with the maturity-aware prompt — open your agent runner **inside the onboarded project** and paste:
+Automatic: after apply, use **Converge with agent** in the review page — it stages the project, runs the agent there, and lets you approve the diff per file (or `--converge`/`--converge-dry` on the CLI). Manual: open your agent runner **inside the onboarded project** and paste:
 
 ```
 Fill the {{placeholders}} in the scaffolded files. Follow @prompts/onboard-fill.md —

@@ -66,6 +66,10 @@ const MANIFEST = {
   agentProfiles: {
     devin: {
       instructionsFile: 'AGENTS.md',
+      mcpConfigPath: '.devin/config.json',
+      mcpConfigKey: 'mcpServers',
+      hooksConfigPath: '.devin/hooks.v1.json',
+      hooksConfigFormat: 'standalone',
       rulesDir: '.windsurf/rules',
       rulesEnabled: true,
       skillDirs: ['~/.agents/skills'],
@@ -78,6 +82,15 @@ const MANIFEST = {
     },
     omp: {
       specialist: { kind: 'profiles', profileDir: '~/.omp/profiles/<id>/agent' },
+    },
+  },
+  // Converge runner for tests: `node` is PATH-detectable and the script
+  // does the placeholder fill an agent would do (reads prompt file arg,
+  // rewrites {{PROJECT_NAME}} in the project's AGENTS.md).
+  onboardingAgents: {
+    testagent: {
+      detect: 'node',
+      spawn: `node ${path.join(TMP, 'kit', 'fake-agent.cjs').split(path.sep).join('/')} {PROMPT_FILE}`,
     },
   },
 };
@@ -146,6 +159,22 @@ let uiMod;
 before(async () => {
   fs.mkdirSync(KIT, { recursive: true });
   fs.cpSync(path.join(REPO_ROOT, 'bin'), path.join(KIT, 'bin'), { recursive: true });
+  fs.cpSync(path.join(REPO_ROOT, 'scaffold.ps1'), path.join(KIT, 'scaffold.ps1'));
+  fs.cpSync(path.join(REPO_ROOT, 'scaffold.sh'), path.join(KIT, 'scaffold.sh'));
+  writeKit('prompts/onboard-fill.md',
+    '# fill\nResolve {{placeholders}} from the codebase. TBD what is unknown.\n');
+  writeKit('fake-agent.cjs', [
+    "// Stand-in for an agent runner: performs the converge edit.",
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const p = path.join(process.cwd(), 'AGENTS.md');",
+    "if (fs.existsSync(p)) {",
+    "  fs.writeFileSync(p, fs.readFileSync(p, 'utf8').split('{{PROJECT_NAME}}').join('ConvergedProject'));",
+    "}",
+    "fs.writeFileSync(path.join(process.cwd(), '.converge-ran'), 'yes');",
+    "console.log('fake converge done');",
+    "",
+  ].join('\n'));
   writeKit('onboard.manifest.json', JSON.stringify(MANIFEST, null, 2) + '\n');
   writeKit('templates/AGENTS.md.tmpl', AGENTS_TMPL);
   writeKit('templates/rules/dev-env.md.tmpl', RULES_TMPL);
@@ -666,4 +695,76 @@ test('profiles: unknown id 404; bad harness/mcp 400', async () => {
   const badMcp = await api('POST', '/api/profiles',
     { id: 'x-bad', mcpServers: ['not-a-server'] });
   assert.equal(badMcp.status, 400);
+});
+
+// Converge: POST /api/onboard/converge runs the onboarding agent in a
+// STAGED copy — the project is untouched until /approve writes the
+// accepted staged files (all or a subset).
+test('onboard converge: staged diff, approve subset writes only those files', async () => {
+  const dir = path.join(PROJ_DIR, 'converge-proj');
+  fs.mkdirSync(dir, { recursive: true });
+
+  const planRes = await api('POST', '/api/onboard/plans',
+    { target: dir, profile: 'devin', agent: 'testagent' });
+  assert.equal(planRes.status, 200, JSON.stringify(planRes.body));
+  const planId = planRes.body.planId;
+  assert.ok(planRes.body.plan.some(r => r.artifact === 'AGENTS.md'),
+    'plan covers AGENTS.md');
+
+  // Converge before apply is a client error.
+  assert.equal((await api('POST', '/api/onboard/converge',
+    { planId, runner: 'testagent' })).status, 400);
+
+  const accepted = planRes.body.plan
+    .map(r => r.artifact)
+    .filter(a => a !== '(project)' && !a.includes(':'));
+  const applied = await api('POST', `/api/onboard/plans/${planId}/apply`,
+    { accepted });
+  assert.equal(applied.status, 200, JSON.stringify(applied.body));
+  const agentsMd = path.join(dir, 'AGENTS.md');
+  assert.ok(fs.existsSync(agentsMd), 'scaffold wrote AGENTS.md');
+  assert.ok(fs.readFileSync(agentsMd, 'utf8')
+    .includes('{{PROJECT_NAME}}'), 'placeholder present before converge');
+
+  const start = await api('POST', '/api/onboard/converge',
+    { planId, runner: 'testagent' });
+  assert.equal(start.status, 202, JSON.stringify(start.body));
+  assert.equal(start.body.status, 'running');
+
+  let job = start.body;
+  for (let i = 0; i < 30 && job.status === 'running'; i++) {
+    await new Promise(r => setTimeout(r, 250));
+    job = (await api('GET', `/api/onboard/jobs/${job.id}`)).body;
+  }
+  assert.equal(job.status, 'done', `job ended ${job.status}: ${job.error}`);
+
+  // Dry-run contract: the project file is UNCHANGED until approve.
+  assert.ok(fs.readFileSync(agentsMd, 'utf8').includes('{{PROJECT_NAME}}'),
+    'project untouched while job is staged');
+  assert.ok(!fs.existsSync(path.join(dir, '.converge-ran')),
+    'agent ran in staging, not in the project');
+  const agentChange = job.changes.find(c => c.file === 'AGENTS.md');
+  assert.ok(agentChange, 'AGENTS.md is a staged change');
+  assert.equal(agentChange.action, 'modified');
+  assert.ok(agentChange.diffText.includes('ConvergedProject'),
+    'diff shows the placeholder fill');
+  assert.ok(job.changes.some(c => c.file === '.converge-ran' && c.action === 'created'),
+    'new file staged as created');
+  assert.deepEqual(job.placeholdersLeft, [], 'staging has no placeholders left');
+
+  // Approve only AGENTS.md — the stray marker file stays unwritten.
+  const apr = await api('POST', `/api/onboard/jobs/${job.id}/approve`,
+    { files: ['AGENTS.md'] });
+  assert.equal(apr.status, 200, JSON.stringify(apr.body));
+  assert.deepEqual(apr.body.written, ['AGENTS.md']);
+  assert.ok(fs.readFileSync(agentsMd, 'utf8').includes('ConvergedProject'),
+    'approved file written to the project');
+  assert.ok(!fs.existsSync(path.join(dir, '.converge-ran')),
+    'unapproved file never lands in the project');
+
+  // Unknown job ids 404; approving a non-staged path is 400.
+  assert.equal((await api('GET', '/api/onboard/jobs/nope')).status, 404);
+  const badApprove = await api('POST', `/api/onboard/jobs/${job.id}/approve`,
+    { files: ['../../etc/passwd'] });
+  assert.equal(badApprove.status, 400);
 });

@@ -145,6 +145,17 @@
       }
     },
     {
+      "name": "context-mode",
+      "required": true,
+      "tier": "core",
+      "hint": "Session memory + FTS5 knowledge base — install via MCP config (stdio server: `context-mode` with no args)",
+      "config": {
+        "command": "npx",
+        "args": ["-y", "context-mode@latest"],
+        "env": {}
+      }
+    },
+    {
       "name": "chrome-devtools",
       "required": false,
       "tier": "specialist",
@@ -202,6 +213,40 @@
       "agent": { "file": "templates/agents/qa-agent.md.tmpl" },
       "spawn": { "omp": "omp -p --auto-approve --profile qa-agent \"@{PROMPT_FILE}\"" },
       "harnesses": ["omp", "opencode", "claude-code", "devin"],
+      "origin": "kit"
+    }
+    ,
+    {
+      "id": "qa",
+      "label": "QA (omp)",
+      "description": "omp-only QA profile: browser UI verification via Chrome DevTools + Playwright MCP, with testing/debugging skills. No design or implementation skills — sync it and run `omp --profile qa`.",
+      "skills": ["browser-testing-with-devtools", "test-driven-development", "debugging-and-error-recovery"],
+      "cliTools": [],
+      "mcpServers": ["chrome-devtools", "playwright"],
+      "alias": "o-qa2",
+      "harnesses": ["omp"],
+      "origin": "kit"
+    },
+    {
+      "id": "ui-designer",
+      "label": "UI designer (omp)",
+      "description": "omp-only design profile: ui-design-orchestrator as the entry router plus the direction/refinement skills and browser MCP for visual verification. Sync it and run `omp --profile ui-designer` for any UX/UI work.",
+      "skills": ["ui-design-orchestrator", "frontend-ui-engineering", "design-taste-frontend", "web-design-guidelines", "minimalist-ui", "high-end-visual-design", "stop-slop", "impeccable"],
+      "cliTools": [],
+      "mcpServers": ["chrome-devtools", "playwright"],
+      "alias": "o-ui",
+      "harnesses": ["omp"],
+      "origin": "kit"
+    },
+    {
+      "id": "developer",
+      "label": "Developer (omp)",
+      "description": "omp-only implementation profile: the day-to-day dev loop (spec → plan → TDD → review → debug → document) with core MCP only (semble, code-review-graph, context-mode) — no browser/design servers in context.",
+      "skills": ["spec-driven-development", "planning-and-task-breakdown", "test-driven-development", "code-review-and-quality", "debugging-and-error-recovery", "api-and-interface-design", "documentation-and-adrs"],
+      "cliTools": [],
+      "mcpServers": [],
+      "alias": "o-dev",
+      "harnesses": ["omp"],
       "origin": "kit"
     }
   ],
@@ -359,7 +404,7 @@
   "onboardingAgents": {
     "devin": {
       "detect": "devin",
-      "spawn": "devin -p --prompt-file {PROMPT_FILE} --permission-mode yolo --export"
+      "spawn": "devin -p --prompt-file {PROMPT_FILE} --permission-mode yolo --respect-workspace-trust false --export"
     },
     "claude": {
       "detect": "claude",

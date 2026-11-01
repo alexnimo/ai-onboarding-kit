@@ -28,7 +28,11 @@ export async function renderDashboard() {
       ? null
       : el('p', { class: 'empty' }, 'No projects registered yet.'),
     el('h2', {}, 'Register a project'),
-    registerForm());
+    registerForm(),
+    el('h2', {}, 'Onboard a project'),
+    el('p', { class: 'muted' },
+      'Runs the scaffold, then an agent fills the {{placeholders}} and converges the generated docs for the project. Works for new and existing projects.'),
+    onboardForm());
   if (!doctor) {
     root.insertBefore(el('p', { class: 'warn' },
       'Doctor data unavailable - health columns hidden.'), root.children[2]);
@@ -220,4 +224,67 @@ function registerForm() {
     agentsFieldset,
     el('p', {},
       el('button', { type: 'submit', class: 'button primary' }, 'Register')));
+}
+
+/**
+ * Onboard form: target + bootstrap profile + converge runner + skills.
+ * Creates an onboard plan and navigates to the review view; nothing is
+ * written until the user applies there.
+ */
+function onboardForm() {
+  const form = el('form', {});
+  const profileSel = el('select', { name: 'profile', required: true });
+  const runnerSel = el('select', { name: 'runner' });
+  const skillsCheck = el('input', { type: 'checkbox', name: 'installSkills', checked: true });
+
+  api.onboardAgents().then(r => {
+    const harnesses = (r.harnesses || []);
+    profileSel.replaceChildren(...harnesses.map(h =>
+      el('option', { value: h.name, disabled: !h.available },
+        `${h.name}${h.available ? '' : ' (not on PATH)'}`)));
+    const runners = (r.agents || []);
+    runnerSel.replaceChildren(
+      el('option', { value: '' }, 'none - scaffold only, fill placeholders manually'),
+      ...runners.map(a =>
+        el('option', { value: a.name, disabled: !a.available },
+          `${a.name}${a.available ? ' (on PATH)' : ' (not on PATH)'}`)));
+  }).catch(() => {
+    profileSel.replaceChildren(el('option', {}, 'devin'));
+    runnerSel.replaceChildren(el('option', { value: '' }, 'unavailable'));
+  });
+
+  async function submit(e) {
+    e.preventDefault();
+    const btn = form.querySelector('button[type="submit"]');
+    btn.disabled = true;
+    try {
+      const res = await api.onboardPlan({
+        target: form.elements.target.value.trim(),
+        profile: profileSel.value,
+        agent: runnerSel.value || undefined,
+        installSkills: skillsCheck.checked,
+      });
+      location.hash = `#/onboard?plan=${res.planId}`;
+    } catch (err) {
+      toast(`Onboard plan failed: ${err.message}`, 'error');
+      btn.disabled = false;
+    }
+  }
+  form.onsubmit = submit;
+  form.append(
+    el('p', {},
+      el('label', {}, 'Path ',
+        el('input', {
+          name: 'target', required: true, size: '40',
+          placeholder: 'C:\\path\\to\\project or /path/to/project',
+        })),
+      ' ',
+      el('label', {}, 'Harness ', profileSel),
+      ' ',
+      el('label', {}, 'Converge agent ', runnerSel)),
+    el('p', {},
+      el('label', { class: 'chip-check' }, skillsCheck, ' Install required skills'),
+      ' ',
+      el('button', { type: 'submit', class: 'button primary' }, 'Plan onboarding')));
+  return form;
 }

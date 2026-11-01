@@ -449,7 +449,8 @@ function commandInjectRegions(opts) {
 
 /**
  * onboard --target <path> [--profile <profile>] [--agent <runner>]
- *         [--resolve-with <runner>] [--apply] [--json]
+ *         [--resolve-with <runner>] [--converge [--converge-with <runner>]
+ *         | --converge-dry] [--apply] [--json]
  *         [--install-skills] [--update-skills] [--force] [--manifest <path>]
  *
  * Builds the onboarding plan (node rows from onboard-plan.mjs merged with
@@ -527,7 +528,45 @@ async function commandOnboard(opts) {
     const res = spawnSync(scaffold.cmd, args, { stdio: 'inherit' });
     fs.rmSync(path.dirname(onlyFile), { recursive: true, force: true });
     if (res.status !== 0) throw new Error(`scaffold apply exited ${res.status}`);
-    console.log('Onboarding applied. Fill {{placeholders}} in the generated files.');
+
+    // --converge / --converge-with: run the onboarding agent in a STAGED
+    // copy of the project, print the resulting diff, then write all
+    // changed files back. --converge-dry prints the diff and writes
+    // nothing (the staging dir is cleaned up). The UI's converge panel
+    // offers per-file approval; the CLI is all-or-nothing.
+    const runnerKey = opts['converge-with']
+      || ((opts.converge || opts['converge-dry'])
+        ? (opts['resolve-with'] || opts.agent || 'devin') : null);
+    if (runnerKey) {
+      const { buildConvergePrompt, spawnRunner, stageTree,
+        diffStagedTree, applyStagedFile, rmStaging } =
+        await import('./lib/agent-spawn.mjs');
+      const staging = stageTree(projectRoot);
+      console.log(`Converging with ${runnerKey} in staged copy ${staging}...`);
+      const prompt = buildConvergePrompt({
+        target: staging, runner: runnerKey,
+        applied: plan.map(r => r.artifact).filter(a => a !== '(project)'),
+      });
+      const out = spawnRunner(runnerKey, prompt, { cwd: staging });
+      if (!out.ok) {
+        rmStaging(staging);
+        throw new Error(`converge failed: ${out.error}`);
+      }
+      const changes = diffStagedTree(staging, projectRoot);
+      if (!changes.length) console.log('Converge produced no changes.');
+      for (const c of changes) console.log(c.diffText);
+      if (opts['converge-dry']) {
+        console.log(`--converge-dry: ${changes.length} change(s) previewed, nothing written.`);
+      } else {
+        for (const c of changes.filter(c => c.action !== 'deleted')) {
+          applyStagedFile(staging, projectRoot, c.file);
+        }
+        console.log(`Converge applied ${changes.filter(c => c.action !== 'deleted').length} file(s).`);
+      }
+      rmStaging(staging);
+      return;
+    }
+    console.log('Onboarding applied. Run again with --converge (or converge in the UI) to fill {{placeholders}}.');
     return;
   }
 
@@ -656,6 +695,7 @@ const USAGE = `Usage:
   node bin/onboard.mjs record-state --path P [--manifest <path>] [--dry-run]
   node bin/onboard.mjs onboard --target <path> [--profile <profile>] [--agent <runner>]
                              [--resolve-with <runner>] [--apply] [--json]
+                             [--converge [--converge-with <runner>] | --converge-dry]
                              [--install-skills] [--update-skills] [--force]
   node bin/onboard.mjs inject-regions --path P [--manifest <path>] [--dry-run]
   node bin/onboard.mjs sync [--project NAME] [--dry-run] [--force] [--json]

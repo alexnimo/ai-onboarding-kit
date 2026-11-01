@@ -194,6 +194,85 @@ test('deleteProfileArtifacts: modified generated file is kept, not deleted', () 
   assert.ok(fs.existsSync(f));
 });
 
+test('applyProfilePlan: removing an mcpServer prunes it from merged files', () => {
+  const root = tmp();
+  const st = state();
+  const profile = { ...PROFILE, harnesses: ['opencode', 'devin'] };
+  applyProfilePlan(planProfile(profile, MANIFEST, root), profile, st);
+
+  const ocPath = path.join(root, 'opencode.json');
+  const dvPath = path.join(root, '.devin', 'mcp_config.local.json');
+  const before = JSON.parse(fs.readFileSync(ocPath, 'utf8'));
+  assert.ok(before.mcp['chrome-devtools'] && before.mcp.playwright);
+  assert.equal(before.tools['chrome-devtools_*'], false);
+
+  // Add a foreign key the kit never wrote — it must survive every merge.
+  const withForeign = JSON.parse(fs.readFileSync(ocPath, 'utf8'));
+  withForeign.mcp['user-server'] = { type: 'local', command: ['x'] };
+  fs.writeFileSync(ocPath, JSON.stringify(withForeign));
+
+  // Edit the profile: playwright out.
+  const edited = { ...profile, mcpServers: ['chrome-devtools'] };
+  applyProfilePlan(planProfile(edited, MANIFEST, root), edited, st);
+
+  const oc = JSON.parse(fs.readFileSync(ocPath, 'utf8'));
+  assert.ok(oc.mcp['chrome-devtools'], 'kept server still merged');
+  assert.equal(oc.mcp.playwright, undefined, 'removed server pruned from mcp');
+  assert.equal(oc.tools['playwright_*'], undefined, 'removed server pruned from tools');
+  assert.equal(oc.tools['chrome-devtools_*'], false, 'kept deny entry still merged');
+  assert.ok(oc.mcp['user-server'], 'foreign key preserved');
+
+  const dv = JSON.parse(fs.readFileSync(dvPath, 'utf8'));
+  assert.ok(dv.mcpServers['chrome-devtools']);
+  assert.equal(dv.mcpServers.playwright, undefined, 'pruned in devin local config too');
+});
+
+test('applyProfilePlan: legacy record without managedKeys prunes catalog names', () => {
+  const root = tmp();
+  const st = state();
+  const profile = { ...PROFILE, harnesses: ['devin'] };
+  applyProfilePlan(planProfile(profile, MANIFEST, root), profile, st);
+  // Simulate pre-managedKeys state: drop the field from the record.
+  for (const rec of Object.values(st.artifacts)) delete rec.managedKeys;
+
+  const edited = { ...profile, mcpServers: ['chrome-devtools'] };
+  applyProfilePlan(planProfile(edited, MANIFEST, root), edited, st);
+
+  const dv = JSON.parse(fs.readFileSync(
+    path.join(root, '.devin', 'mcp_config.local.json'), 'utf8'));
+  assert.equal(dv.mcpServers.playwright, undefined,
+    'catalog-named stale key pruned under legacy inference');
+});
+
+test('deleteProfileArtifacts: merged file loses only kit keys, foreign content keeps the file', () => {
+  const root = tmp();
+  const st = state();
+  const profile = { ...PROFILE, harnesses: ['devin'] };
+  applyProfilePlan(planProfile(profile, MANIFEST, root), profile, st);
+
+  const dvPath = path.join(root, '.devin', 'mcp_config.local.json');
+  const cur = JSON.parse(fs.readFileSync(dvPath, 'utf8'));
+  cur.mcpServers['user-server'] = { command: 'x' };
+  fs.writeFileSync(dvPath, JSON.stringify(cur));
+
+  const res = deleteProfileArtifacts('qa-agent', st);
+  assert.ok(res.some(r => r.action === 'pruned' && r.dest === dvPath));
+  const after = JSON.parse(fs.readFileSync(dvPath, 'utf8'));
+  assert.deepEqual(Object.keys(after.mcpServers), ['user-server'],
+    'only the foreign server remains');
+});
+
+test('deleteProfileArtifacts: kit-only merged file is deleted outright', () => {
+  const root = tmp();
+  const st = state();
+  const profile = { ...PROFILE, harnesses: ['devin'] };
+  applyProfilePlan(planProfile(profile, MANIFEST, root), profile, st);
+  const dvPath = path.join(root, '.devin', 'mcp_config.local.json');
+  const res = deleteProfileArtifacts('qa-agent', st);
+  assert.ok(res.some(r => r.action === 'deleted' && r.dest === dvPath));
+  assert.ok(!fs.existsSync(dvPath));
+});
+
 // ---------- tier filter on main-config merge ----------
 
 test('mergedMcpConfig: specialist-tier servers never merge into main config', () => {

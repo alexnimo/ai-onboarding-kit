@@ -29,13 +29,13 @@
    - Query callers, callees, dependents, imports, tests, and affected flows.
    - Use graph results to build a bounded reading set.
 
-### Escalate to graph analysis when
-
-- Changing a DB schema, migration, ORM model, shared type, API contract, event payload, queue message, or auth model.
-- A change touches more than one package, service, or layer.
-- The task asks what else is affected.
-- The task involves code review, regression risk, or test impact.
-- The first Semble pass returns multiple plausible implementations.
+3. For durable project memory — past sessions, decisions, indexed docs, or
+   any "what did we decide / what did we already index" question:
+   - Use context-mode first (`ctx_search` before asking the user).
+   - Index bulky outputs with `ctx_index`/`ctx_batch_execute` instead of
+     pasting raw dumps into the conversation.
+   - Search session memory (`source: "decision"|"user-prompt"|"compaction"`)
+     before re-litigating earlier choices.
 
 ### Default workflow
 
@@ -156,14 +156,13 @@ Invoke these when the task matches. They are tools to use in place of ad-hoc app
 
 | Skill | Use when |
 |---|---|
+| `ui-design-orchestrator` | **Any** UX/UI decision or frontend implementation — always defer to the orchestrator (see UX/UI routing above) |
 | `api-and-interface-design` | Designing new API endpoints, module boundaries, or frontend↔backend contracts — contract first, before implementation |
 | `security-and-hardening` | Touching auth, user input, external integrations, or secrets — threat-model first (STRIDE) |
 | `performance-optimization` | Performance is the actual task or a regression is suspected — measure before optimizing |
 | `observability-and-instrumentation` | Shipping pipelines/agents/external integrations that run in prod — instrument alongside the feature |
 | `improve-codebase-architecture` | The task is reducing architectural friction / deepening modules — pair with code-review-graph |
 | `browser-testing-with-devtools` | Debugging or verifying UI via the chrome-devtools MCP (live DOM/console/network/perf trace) |
-| `documentation-and-adrs` | Making a significant architectural decision or changing a public API — record the *why* as an ADR |
-| `handoff` | Context compaction or session/cloud handoff — compact the conversation into a resumable doc |
 | `diagnosing-bugs` | Hard or non-deterministic bugs where you must build a deterministic feedback loop first (escalate from `debugging-and-error-recovery`) |
 | `full-output-enforcement` | Task requires exhaustive, unabridged output with no placeholders or truncation |
 | `excalidraw-diagram-generator` | Creating architecture diagrams, flowcharts, ER diagrams, mind maps |

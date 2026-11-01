@@ -145,6 +145,13 @@ export function resolveServers(profile, manifest, { includeCore = profile.includ
 export function planProfile(profile, manifest, projectRoot = null, { home = os.homedir() } = {}) {
   const artifacts = [];
   const warnings = [];
+  // Full kit-owned server name space (catalog + user-declared inline
+  // servers). Merged artifacts carry it so legacy artifact records — no
+  // managedKeys yet — can still identify and prune stale kit keys.
+  const catalogServers = [...new Set([
+    ...(manifest.mcpServers || []).map(s => s.name),
+    ...(profile.inlineMcpServers || []).map(s => s.name),
+  ])];
   const { servers, missing } = resolveServers(profile, manifest);
   if (missing.length) {
     warnings.push(`unknown mcpServers refs ignored: ${missing.join(', ')}`);
@@ -168,12 +175,12 @@ export function planProfile(profile, manifest, projectRoot = null, { home = os.h
         `project-scope profile '${profile.id}' needs a project selected to write artifacts`);
       continue;
     }
-    emitForHarness({ profile, spec, mcpEntries, servers, artifacts, projectRoot, home, scope });
+    emitForHarness({ profile, spec, mcpEntries, servers, artifacts, projectRoot, home, scope, catalogServers });
   }
   return { artifacts, missingServers: missing, warnings };
 }
 
-function emitForHarness({ profile, spec, mcpEntries, servers, artifacts, projectRoot, home, scope = 'global' }) {
+function emitForHarness({ profile, spec, mcpEntries, servers, artifacts, projectRoot, home, scope = 'global', catalogServers = [] }) {
   const id = profile.id;
   const prj = projectRoot || '<project>';
   const at = (rel, scope) => path.normalize(scope === 'user'
@@ -243,6 +250,7 @@ function emitForHarness({ profile, spec, mcpEntries, servers, artifacts, project
         absPath: at(spec.configPath, 'project'),
         content: JSON.stringify({ mcp, tools }, null, 2) + '\n',
         mergeKeys: { mcp: true, tools: true }, // merged, not whole-file
+        catalogServers,
       });
       artifacts.push({
         harness: 'opencode', scope: 'project',
@@ -279,6 +287,7 @@ function emitForHarness({ profile, spec, mcpEntries, servers, artifacts, project
         absPath: at(spec.localConfigPath, 'project'),
         content: JSON.stringify({ mcpServers: mcp }, null, 2) + '\n',
         mergeKeys: { mcpServers: true },
+        catalogServers,
       });
       artifacts.push({
         harness: 'devin', scope: 'project',
@@ -430,7 +439,8 @@ export function applyProfilePlan(plan, profile, state, { home = os.homedir(), pr
     }
     const key = `${profile.id}:${a.absPath}`;
     if (a.mergeKeys) {
-      const merged = mergeTopLevel(a.absPath, JSON.parse(a.content), a.mergeKeys);
+      const merged = mergeTopLevel(a.absPath, JSON.parse(a.content),
+        a.mergeKeys, mergePrune(state.artifacts[key], a));
       if (merged.changed) {
         fs.mkdirSync(path.dirname(a.absPath), { recursive: true });
         fs.writeFileSync(a.absPath, JSON.stringify(merged.data, null, 2) + '\n');
@@ -442,6 +452,11 @@ export function applyProfilePlan(plan, profile, state, { home = os.homedir(), pr
         // hash the bytes actually written so delete's byte-compare works
         hash: sha256(JSON.stringify(merged.data, null, 2) + '\n'),
         managed: true,
+        // Keys this profile wrote per merged top-level key. The next
+        // merge prunes anything recorded here that is no longer
+        // generated (server removed from the profile); keys it never
+        // wrote (user-added servers) survive.
+        managedKeys: mergeKeySets(a.mergeKeys, JSON.parse(a.content)),
       };
     } else {
       const exists = fs.existsSync(a.absPath)
@@ -522,8 +537,16 @@ function copyOmpAuth(profile, home, projectRoot = null) {
 /**
  * Merge per top-level key for keys flagged in mergeKeys; other keys in the
  * generated object are ignored (kit only owns flagged keys).
+ *
+ * `prune` ({<topKey>: {keys?: string[], names?: Set}}|null): inside a
+ * flagged container, a present key that the generated set no longer
+ * produces is deleted when it is either in `keys` (recorded
+ * managedKeys — exact ownership) or matches `names` (legacy inference:
+ * catalog server name or its `<name>_*` tool pattern). This is how
+ * removing an MCP server from a profile removes it on re-sync; foreign
+ * keys the kit never wrote are preserved.
  */
-function mergeTopLevel(absPath, generated, mergeKeys) {
+function mergeTopLevel(absPath, generated, mergeKeys, prune = null) {
   let data = {};
   let changed = false;
   if (fs.existsSync(absPath)) {
@@ -534,6 +557,18 @@ function mergeTopLevel(absPath, generated, mergeKeys) {
     if (!flag || generated[key] === undefined) continue;
     const cur = isObject(data[key]) ? data[key] : {};
     const next = { ...cur };
+    const p = prune?.[key];
+    if (p) {
+      const owned = new Set(p.keys || []);
+      const names = p.names || null;
+      for (const k of Object.keys(next)) {
+        if (generated[key][k] !== undefined) continue;
+        if (owned.has(k) || (names && names.has(k))) {
+          delete next[k];
+          changed = true;
+        }
+      }
+    }
     for (const [k, v] of Object.entries(generated[key])) {
       if (JSON.stringify(next[k]) !== JSON.stringify(v)) {
         next[k] = v;
@@ -546,6 +581,44 @@ function mergeTopLevel(absPath, generated, mergeKeys) {
     }
   }
   return { data, changed };
+}
+
+/**
+ * Key sets this artifact generates per merge flag — recorded as
+ * `managedKeys` so the next apply/delete knows which keys the kit owns.
+ */
+function mergeKeySets(mergeKeys, generated) {
+  const out = {};
+  for (const [key, flag] of Object.entries(mergeKeys)) {
+    if (flag && isObject(generated[key])) out[key] = Object.keys(generated[key]);
+  }
+  return out;
+}
+
+/**
+ * Prune spec for mergeTopLevel. Normally the recorded managedKeys
+ * (`keys`). Records written before managedKeys existed get `names`:
+ * the kit-owned server name space (plus `<name>_*` tool patterns), so a
+ * stale catalog server dropped from the profile is pruned on the first
+ * re-sync while foreign keys never match and survive.
+ */
+function mergePrune(prevRec, artifact) {
+  if (isObject(prevRec?.managedKeys)) {
+    const out = {};
+    for (const [k, v] of Object.entries(prevRec.managedKeys)) {
+      if (Array.isArray(v)) out[k] = { keys: v };
+    }
+    return out;
+  }
+  const servers = artifact.catalogServers || [];
+  if (!servers.length) return null;
+  const names = new Set();
+  for (const n of servers) { names.add(n); names.add(`${n}_*`); }
+  const out = {};
+  for (const [key, flag] of Object.entries(artifact.mergeKeys || {})) {
+    if (flag) out[key] = { names };
+  }
+  return out;
 }
 
 // ---------- shell alias registration ----------
@@ -626,9 +699,13 @@ export function ensureAliasBlock({ home = os.homedir() } = {}) {
 }
 
 /**
- * Remove a profile's recorded artifacts. Byte-identical/recorded files are
- * deleted; modified files are kept and reported. User-level + project-level
- * both honored via recorded absolute paths.
+ * Remove a profile's recorded artifacts. Whole-file artifacts: byte-
+ * identical files are deleted, modified files kept. Merged artifacts
+ * (records with managedKeys): the profile's recorded keys are pruned out
+ * of the shared file — foreign keys survive — and the file itself is
+ * removed only when nothing else remains. Unreadable/non-JSON merged
+ * files are kept. User-level + project-level both honored via recorded
+ * absolute paths.
  */
 export function deleteProfileArtifacts(profileId, state, { home = os.homedir() } = {}) {
   const results = [];
@@ -638,6 +715,23 @@ export function deleteProfileArtifacts(profileId, state, { home = os.homedir() }
     if (!fs.existsSync(abs)) {
       delete state.artifacts[key];
       results.push({ dest: abs, action: 'already-gone' });
+      continue;
+    }
+    if (isObject(rec.managedKeys)) {
+      // Merged file (opencode.json / .devin/mcp_config.local.json): prune
+      // only the keys this profile wrote; foreign keys keep the file.
+      const { ok, empty } = pruneMergedKeys(abs, rec.managedKeys);
+      if (!ok) {
+        results.push({ dest: abs, action: 'kept-modified' });
+        continue;
+      }
+      if (empty) {
+        fs.rmSync(abs, { force: true });
+        results.push({ dest: abs, action: 'deleted' });
+      } else {
+        results.push({ dest: abs, action: 'pruned' });
+      }
+      delete state.artifacts[key];
       continue;
     }
     const cur = sha256(fs.readFileSync(abs));
@@ -657,6 +751,28 @@ export function deleteProfileArtifacts(profileId, state, { home = os.homedir() }
     try { fs.rmdirSync(d); } catch { /* non-empty or absent — fine */ }
   }
   return results;
+}
+
+/**
+ * Delete every recorded managed key from a merged JSON artifact.
+ *
+ * @returns {{ok:boolean, empty:boolean}} ok=false when the file is not
+ *   parseable JSON (leave it untouched — report kept-modified); empty
+ *   tells the caller the file held only kit keys and can be removed.
+ */
+function pruneMergedKeys(abs, managedKeys) {
+  let data;
+  try { data = JSON.parse(fs.readFileSync(abs, 'utf8')); }
+  catch { return { ok: false, empty: false }; }
+  if (!isObject(data)) return { ok: false, empty: false };
+  for (const [topKey, keys] of Object.entries(managedKeys)) {
+    if (!isObject(data[topKey]) || !Array.isArray(keys)) continue;
+    for (const k of keys) delete data[topKey][k];
+    if (!Object.keys(data[topKey]).length) delete data[topKey];
+  }
+  const empty = !Object.keys(data).length;
+  if (!empty) fs.writeFileSync(abs, JSON.stringify(data, null, 2) + '\n');
+  return { ok: true, empty };
 }
 
 /**

@@ -31,13 +31,21 @@ export const api = {
   apply: (planId, dispositions) =>
     request('POST', `/api/plans/${enc(planId)}/apply`, { dispositions }),
   onboardAgents: () => request('GET', '/api/onboard/agents'),
-  onboardPlan: (target, profile, installSkills) =>
-    request('POST', '/api/onboard/plans', { target, profile, installSkills }),
+  onboardPlan: ({ target, profile, agent, installSkills }) =>
+    request('POST', '/api/onboard/plans', { target, profile, agent, installSkills }),
   onboardGet: planId => request('GET', `/api/onboard/plans/${enc(planId)}`),
   onboardApply: (planId, accepted, content) =>
     request('POST', `/api/onboard/plans/${enc(planId)}/apply`, { accepted, content }),
   onboardResolve: (planId, artifact, runner) =>
     request('POST', `/api/onboard/plans/${enc(planId)}/resolve`, { artifact, runner }),
+  onboardConverge: (planId, runner) =>
+    request('POST', '/api/onboard/converge', { planId, runner }),
+  onboardJob: jobId => request('GET', `/api/onboard/jobs/${enc(jobId)}`),
+  onboardJobCancel: jobId => request('POST', `/api/onboard/jobs/${enc(jobId)}/cancel`),
+  onboardJobApprove: (jobId, files) =>
+    request('POST', `/api/onboard/jobs/${enc(jobId)}/approve`, files ? { files } : {}),
+  onboardJobDiscard: jobId =>
+    request('POST', `/api/onboard/jobs/${enc(jobId)}/discard`),
   profiles: () => request('GET', '/api/profiles'),
   profilePlan: (id, project) =>
     request('GET', `/api/profiles/${enc(id)}/plan${project ? `?project=${enc(project)}` : ''}`),

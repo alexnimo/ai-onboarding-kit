@@ -18,6 +18,7 @@ Invoke this skill for **any** of:
 - Building or modifying a UI component
 - UI copy / text changes inside rendered components
 - Visual or prose anti-slop audit of a UI diff
+- Icons and visual designs for components
 - "Give me a few design options" / multi-design exploration
 - Interactive live comparison of variants on an existing surface (route to
   `variate` when installed — see REGISTRY optional tier)
