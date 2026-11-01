@@ -151,6 +151,7 @@ export function planProfile(profile, manifest, projectRoot = null, { home = os.h
   }
   const mcpEntries = Object.fromEntries(servers.map(s => [s.name, s.config]));
 
+  const scope = profile.scope === 'project' ? 'project' : 'global';
   for (const h of profile.harnesses || []) {
     const hp = (manifest.agentProfiles || {})[h];
     const spec = hp?.specialist;
@@ -162,13 +163,17 @@ export function planProfile(profile, manifest, projectRoot = null, { home = os.h
       warnings.push(`harness '${h}' is core-only — no specialist artifacts`);
       continue;
     }
-    emitForHarness({ profile, spec, mcpEntries, servers, artifacts, projectRoot, home });
+    if (scope === 'project' && !projectRoot) {
+      warnings.push(
+        `project-scope profile '${profile.id}' needs a project selected to write artifacts`);
+      continue;
+    }
+    emitForHarness({ profile, spec, mcpEntries, servers, artifacts, projectRoot, home, scope });
   }
-
   return { artifacts, missingServers: missing, warnings };
 }
 
-function emitForHarness({ profile, spec, mcpEntries, servers, artifacts, projectRoot, home }) {
+function emitForHarness({ profile, spec, mcpEntries, servers, artifacts, projectRoot, home, scope = 'global' }) {
   const id = profile.id;
   const prj = projectRoot || '<project>';
   const at = (rel, scope) => path.normalize(scope === 'user'
@@ -177,15 +182,21 @@ function emitForHarness({ profile, spec, mcpEntries, servers, artifacts, project
 
   switch (spec.kind) {
     case 'profiles': { // omp
-      const dir = spec.profileDir.replace('<id>', id);
+      // scope 'project' relocates the profile root into the repo:
+      // <project>/.omp/profiles/<id>/agent — invoke via
+      // PI_CONFIG_DIR=<project>/.omp omp --profile <id>
+      const dir = scope === 'project'
+        ? `.omp/profiles/${id}/agent`
+        : spec.profileDir.replace('<id>', id);
+      const artScope = scope === 'project' ? 'project' : 'user';
       artifacts.push({
-        harness: 'omp', scope: 'user', dest: `${dir}/mcp.json`,
-        absPath: at(`${dir}/mcp.json`, 'user'),
+        harness: 'omp', scope: artScope, dest: `${dir}/mcp.json`,
+        absPath: at(`${dir}/mcp.json`, artScope),
         content: JSON.stringify({ mcpServers: mcpEntries }, null, 2) + '\n',
       });
       artifacts.push({
-        harness: 'omp', scope: 'user', dest: `${dir}/AGENTS.md`,
-        absPath: at(`${dir}/AGENTS.md`, 'user'),
+        harness: 'omp', scope: artScope, dest: `${dir}/AGENTS.md`,
+        absPath: at(`${dir}/AGENTS.md`, artScope),
         content: renderProfileInstructions(profile, 'omp'),
       });
       // Shell alias (opt-in via profile.alias): a sourceable snippet the
@@ -195,13 +206,19 @@ function emitForHarness({ profile, spec, mcpEntries, servers, artifacts, project
         artifacts.push({
           harness: 'omp', scope: 'user', dest: shDest,
           absPath: at(shDest, 'user'),
-          content: `# alias for omp profile '${id}' — source this file or copy the line\nalias ${profile.alias}='omp --profile ${id}'\n`,
+          content: `# alias for omp profile '${id}' — source this file or copy the line\n`
+            + (scope === 'project'
+              ? `alias ${profile.alias}='PI_CONFIG_DIR=$PWD/.omp omp --profile ${id}'\n`
+              : `alias ${profile.alias}='omp --profile ${id}'\n`),
         });
         const psDest = `~/.ai-onboarding-kit/aliases/${id}.ps1`;
         artifacts.push({
           harness: 'omp', scope: 'user', dest: psDest,
           absPath: at(psDest, 'user'),
-          content: `# alias for omp profile '${id}' — dot-source this file or copy the lines\nfunction ${profile.alias} { omp --profile ${id} @args }\n`,
+          content: `# alias for omp profile '${id}' — dot-source this file or copy the lines\n`
+            + (scope === 'project'
+              ? `function ${profile.alias} { $env:PI_CONFIG_DIR="$PWD\\.omp"; omp --profile ${id} @args }\n`
+              : `function ${profile.alias} { omp --profile ${id} @args }\n`),
         });
       }
       break;
@@ -385,7 +402,9 @@ export function invokeStrings(profile) {
   const out = {};
   for (const h of profile.harnesses || []) {
     out[h] = {
-      omp: `omp --profile ${id}`,
+      omp: profile.scope === 'project'
+        ? `PI_CONFIG_DIR='<project>/.omp' omp --profile ${id}`
+        : `omp --profile ${id}`,
       opencode: `opencode run --agent ${id} "<task>"  # or @${id} interactively`,
       'claude-code': `claude --mcp-config .claude/mcp-${id}.json --strict-mcp-config --agent ${id}`,
       devin: `devin mcp enable chrome-devtools -s local && devin  # then dispatch to ${id} agent`,
@@ -402,7 +421,7 @@ export function invokeStrings(profile) {
  *
  * @returns {Array<{dest:string, action:string}>}
  */
-export function applyProfilePlan(plan, profile, state, { home = os.homedir() } = {}) {
+export function applyProfilePlan(plan, profile, state, { home = os.homedir(), projectRoot = null } = {}) {
   const results = [];
   for (const a of plan.artifacts) {
     if (a.absPath.includes('<project>')) {
@@ -448,7 +467,7 @@ export function applyProfilePlan(plan, profile, state, { home = os.homedir() } =
   // config.yml when absent). Off => the profile starts unauthenticated and
   // the user runs `omp --profile <id> login` themselves.
   if (profile.copyAuth && (profile.harnesses || []).includes('omp')) {
-    results.push(...copyOmpAuth(profile, home));
+    results.push(...copyOmpAuth(profile, home, projectRoot));
   }
   return results;
 }
@@ -458,9 +477,13 @@ export function applyProfilePlan(plan, profile, state, { home = os.homedir() } =
  * default (unnamed) profile into `<home>/.omp/profiles/<id>/agent/`.
  * Best-effort per step; failures surface as result rows, not throws.
  */
-function copyOmpAuth(profile, home) {
+function copyOmpAuth(profile, home, projectRoot = null) {
   const results = [];
-  const agentDir = path.join(home, '.omp', 'profiles', profile.id, 'agent');
+  const isProject = profile.scope === 'project' && projectRoot;
+  const agentDir = isProject
+    ? path.join(projectRoot, '.omp', 'profiles', profile.id, 'agent')
+    : path.join(home, '.omp', 'profiles', profile.id, 'agent');
+  const configDir = isProject ? path.join(projectRoot, '.omp') : null;
 
   // 1. Provider credentials via the omp CLI (handles OAuth + API keys).
   const exp = spawnSync('omp', ['auth', 'export'],
@@ -470,7 +493,8 @@ function copyOmpAuth(profile, home) {
       action: `skip: auth export failed (${exp.error?.message || `exit ${exp.status}`})` });
   } else {
     const imp = spawnSync('omp', ['--profile', profile.id, 'auth', 'import', '-'],
-      { input: exp.stdout, encoding: 'utf8', timeout: 30000 });
+      { input: exp.stdout, encoding: 'utf8', timeout: 30000,
+        env: configDir ? { ...process.env, PI_CONFIG_DIR: configDir } : undefined });
     results.push({
       dest: `omp --profile ${profile.id} credentials`,
       action: imp.error || imp.status !== 0

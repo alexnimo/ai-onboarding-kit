@@ -413,13 +413,18 @@ Add a rule: drop `my-rule.md.tmpl` in `templates/rules/`, add `{"src": "template
 
 MCP servers carry a `tier`: `core` (merged into every agent's main config — today `semble`, `code-review-graph`) or `specialist` (never in a main config; routed only to profile destinations — today `chrome-devtools`, `playwright`). This keeps browser/QA schemas out of coding sessions.
 
-A **profile** is a named capability bundle (`id`, `skills`, `cliTools`, `mcpServers`, `harnesses`, agent template, optional `spawn` template). The id doubles as the alias: `omp --profile qa-agent` is the invoke string. Kit profiles live in `manifest.profiles` (`design`, `qa-agent`); user profiles/overrides and generated-artifact hashes persist in `profiles.user.json` (gitignored).
+A **profile** is a named capability bundle (`id`, `skills`, `cliTools`, `mcpServers`, `harnesses`, `scope`, agent template, optional `spawn` template). The id doubles as the alias: `omp --profile qa-agent` is the invoke string. Kit profiles live in `manifest.profiles` (`design`, `qa-agent`); user profiles/overrides and generated-artifact hashes persist in `profiles.user.json` (gitignored).
+
+**Profile scope** (`scope`, default `global`):
+
+- `global` — omp profile root at `~/.omp/profiles/<id>`; works from any directory. Alias: `omp --profile <id>`.
+- `project` — omp profile root relocates into the repo at `<project>/.omp/profiles/<id>`; skills/MCP live next to the codebase, never leak into your global profile dir. Requires a project selected on plan/sync. Invoke: `PI_CONFIG_DIR=<project>/.omp omp --profile <id>` — the generated shell alias pins `PI_CONFIG_DIR=$PWD/.omp`, so run it from the repo root. Use for repo-isolated harness config. Other harnesses (opencode/claude-code/devin) are already project-file based; scope only changes the omp artifacts.
 
 ```bash
 node bin/onboard.mjs profile --list                        # profiles + invoke strings
 node bin/onboard.mjs profile --plan qa-agent --project P   # artifact preview
 node bin/onboard.mjs profile --sync qa-agent --project P   # write artifacts
-node bin/onboard.mjs profile --create my-p --label "X" --mcps chrome-devtools --harnesses omp
+node bin/onboard.mjs profile --create my-p --label "X" --mcps chrome-devtools --harnesses omp --scope project
 node bin/onboard.mjs profile --delete qa-agent             # removes recorded artifacts
 ```
 

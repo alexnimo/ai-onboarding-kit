@@ -598,6 +598,7 @@ function commandProfile(opts) {
       cliTools: opts.cliTools ? String(opts.cliTools).split(',') : [],
       mcpServers: opts.mcps ? String(opts.mcps).split(',') : [],
       harnesses: opts.harnesses ? String(opts.harnesses).split(',') : ['omp'],
+      ...(opts.scope === 'project' ? { scope: 'project' } : {}),
     };
     state.profiles[id] = p;
     saveProfileState(state);
@@ -639,7 +640,7 @@ function commandProfile(opts) {
   const missing = skills.filter(s => !s.present);
   for (const s of skills) console.log(`  skill ${s.present ? '[installed]' : '[MISSING]'}  ${s.name}`);
   if (missing.length) console.log(`  hint: install missing skills via npx skills add before relying on this profile`);
-  const results = applyProfilePlan(plan, profile, state);
+  const results = applyProfilePlan(plan, profile, state, { projectRoot });
   saveProfileState(state);
   for (const w of plan.warnings) console.log(`  warn: ${w}`);
   for (const r of results) console.log(`  ${r.action}  ${r.dest}`);
@@ -667,7 +668,7 @@ const USAGE = `Usage:
   node bin/onboard.mjs profile --sync <id> [--project <path>]
   node bin/onboard.mjs profile --create <id> --label <txt>
                           [--skills a,b] [--mcps a,b] [--harnesses a,b]
-                          [--description <txt>]
+                          [--description <txt>] [--scope global|project]
   node bin/onboard.mjs profile --delete <id>
   node bin/onboard.mjs ui [--port 4173]`;
 

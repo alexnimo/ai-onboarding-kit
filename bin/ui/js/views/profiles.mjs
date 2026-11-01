@@ -88,6 +88,7 @@ export function renderProfiles() {
         el('th', { scope: 'col' }, 'Skills'),
         el('th', { scope: 'col' }, 'MCP servers'),
         el('th', { scope: 'col' }, 'Invoke'),
+        el('th', { scope: 'col' }, 'Scope'),
         el('th', { scope: 'col' }, el('span', { class: 'sr-only' }, 'Actions')))),
       el('tbody', {}, state.profiles.map(p => el('tr', {},
         el('td', {},
@@ -105,6 +106,9 @@ export function renderProfiles() {
         el('td', {}, el('ul', { class: 'chips' },
           Object.entries(p.invoke || {}).map(([h, cmd]) => el('li', {},
             el('code', { title: cmd }, cmd))))),
+        el('td', {}, el('span', {
+          class: `badge badge-${p.scope === 'project' ? 'ok' : 'neutral'}`,
+        }, p.scope === 'project' ? 'project' : 'global')),
         el('td', {}, el('div', { class: 'card-actions' },
           el('button', {
             type: 'button', class: 'button',
@@ -260,6 +264,7 @@ export function renderProfiles() {
     if (form.elements.alias) form.elements.alias.value = p.alias || '';
     if (form.elements.copyAuth) form.elements.copyAuth.checked = !!p.copyAuth;
     if (form.elements.includeCoreMcp) form.elements.includeCoreMcp.checked = p.includeCoreMcp !== false;
+    if (form.elements.scope) form.elements.scope.value = p.scope === 'project' ? 'project' : 'global';
     for (const name of ['skills', 'cliTools', 'mcpServers', 'harnesses']) {
       const values = new Set(
         name === 'skills'
@@ -301,6 +306,7 @@ export function renderProfiles() {
         alias: form.elements.alias?.value.trim() || '',
         copyAuth: !!form.elements.copyAuth?.checked,
         includeCoreMcp: !!form.elements.includeCoreMcp?.checked,
+        scope: form.elements.scope?.value === 'project' ? 'project' : 'global',
       };
       try {
         if (state.editing) {
@@ -456,6 +462,15 @@ export function renderProfiles() {
         ' ',
         el('span', { class: 'hint' },
           'sync writes ~/.ai-onboarding-kit/aliases/<id>.sh|.ps1 and appends a managed source-block to your shell rc (bashrc/zshrc/profile/PS profile) so the alias works with no manual step; delete removes the files')),
+      el('p', {},
+        el('label', {}, 'Profile scope ',
+          el('select', { name: 'scope' },
+            el('option', { value: 'global' }, 'global — ~/.omp/profiles/<id> (default)'),
+            el('option', { value: 'project' },
+              'project — <project>/.omp/profiles/<id>, isolated per repo'))),
+        ' ',
+        el('span', { class: 'hint' },
+          'project scope needs a project selected on Plan/Sync; invoke via PI_CONFIG_DIR=<project>/.omp omp --profile <id> (the generated alias pins it to the project cwd)')),
       el('fieldset', {},
         el('legend', {}, 'Skills'),
         skills.nodes.length ? skills.nodes : el('p', { class: 'muted' }, 'None in catalog'),
