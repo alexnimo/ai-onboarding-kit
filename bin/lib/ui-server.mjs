@@ -71,6 +71,9 @@ import {
   deleteProfileArtifacts,
   invokeStrings,
   skillStatus,
+  profileCatalog,
+  validateProfileFields,
+  buildUserProfile,
   PROFILES_USER_PATH,
 } from './profiles.mjs';
 import { checkProject } from './doctor.mjs';
@@ -111,10 +114,6 @@ const MAX_PLANS = 200;
 const PLAN_TTL_MS = 30 * 60 * 1000;
 
 const PROFILE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
-// Fields the UI/PUT routes may write onto user profiles or kit overrides.
-const PROFILE_EDITABLE = ['label', 'description', 'skills', 'cliTools',
-  'mcpServers', 'harnesses', 'alias', 'disabled', 'copyAuth', 'includeCoreMcp', 'scope'];
-const PROFILE_LIST_FIELDS = ['skills', 'cliTools', 'mcpServers', 'harnesses'];
 
 /** Error carrying an HTTP status; anything else becomes a bare 500. */
 function httpError(status, message) {
@@ -497,28 +496,6 @@ export function createUiServer(opts = {}) {
   /** Parsed manifest (loaded per request: no stale catalog). */
   const loadManifest = () => readJson(resolveManifestPath(undefined));
 
-  /** Catalog names the create/edit forms validate against. */
-  const profileCatalog = (manifest, state) => ({
-    skills: [
-      ...(manifest.skills || []).map(s => s.name),
-      ...(manifest.templateSkills || []).map(t => t.dest),
-      ...(state?.custom?.skills || []).map(s => s.name),
-    ],
-    cliTools: (manifest.cliTools || []).map(t => t.name),
-    mcpServers: [
-      ...(manifest.mcpServers || []).map(s => ({
-        name: s.name, tier: s.tier || 'core', required: !!s.required,
-      })),
-      ...(state?.custom?.mcpServers || []).map(s => ({
-        name: s.name, tier: s.tier || 'specialist', required: false, custom: true,
-      })),
-    ],
-    harnesses: Object.keys(manifest.agentProfiles || {}),
-    custom: {
-      skills: state?.custom?.skills || [],
-      mcpServers: state?.custom?.mcpServers || [],
-    },
-  });
 
   /** Profile -> API payload (skill presence + invoke strings). */
   const profileRow = profile => ({
@@ -528,60 +505,32 @@ export function createUiServer(opts = {}) {
   });
 
   /**
-   * Validate + pick editable profile fields off a request body. Throws
-   * 400 on bad types or names outside the manifest catalog + custom items.
+   * Registry upsert keyed by resolved path (same shape as POST
+   * /api/projects). Agents merge rather than replace; name only changes
+   * when supplied. Used when onboard finds an adopted project so sync
+   * results have a registry entry to land on.
    */
-  const pickProfileFields = (body, manifest, state) => {
-    const fields = {};
-    for (const key of PROFILE_EDITABLE) {
-      if (body[key] === undefined) continue;
-      if (PROFILE_LIST_FIELDS.includes(key)) {
-        if (!Array.isArray(body[key])
-            || body[key].some(v => typeof v !== 'string')) {
-          throw httpError(400, `${key} must be an array of strings`);
-        }
-        fields[key] = [...new Set(body[key])];
-      } else if (key === 'scope') {
-        if (body[key] !== 'global' && body[key] !== 'project') {
-          throw httpError(400, "scope doit valoir 'global' ou 'project'");
-        }
-        fields[key] = body[key];
-      } else if (key === 'disabled' || key === 'copyAuth'
-                 || key === 'includeCoreMcp') {
-        fields[key] = body[key] === true;
-      } else {
-        if (typeof body[key] !== 'string') {
-          throw httpError(400, `${key} must be a string`);
-        }
-        if (key === 'alias' && body[key]
-            && !/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(body[key])) {
-          throw httpError(400,
-            'alias must be a shell-safe name (letters, digits, -, _)');
-        }
-        fields[key] = body[key];
+  const upsertRegistered = (projectRoot, { name = null, agents = [] } = {}) => {
+    const now = new Date().toISOString();
+    updateRegistry(reg => {
+      const entry = reg.projects.find(p => p.path === projectRoot);
+      if (!entry) {
+        reg.projects.push({
+          name: name || path.basename(projectRoot),
+          path: projectRoot,
+          agents,
+          onboardedAt: now,
+          lastSyncAt: now,
+          overrides: { skip: [], pins: {} },
+        });
+        return 'registered';
       }
-    }
-    const catalog = profileCatalog(manifest, state);
-    const mcpNames = new Set(catalog.mcpServers.map(s => s.name));
-    for (const name of fields.mcpServers || []) {
-      if (!mcpNames.has(name)) {
-        throw httpError(400, `unknown mcpServer: ${name}`);
-      }
-    }
-    const harnessNames = new Set(catalog.harnesses);
-    for (const name of fields.harnesses || []) {
-      if (!harnessNames.has(name)) {
-        throw httpError(400, `unknown harness: ${name}`);
-      }
-    }
-    const skillNames = new Set(catalog.skills);
-    for (const name of fields.skills || []) {
-      if (!skillNames.has(name)) {
-        throw httpError(400, `unknown skill: ${name}`);
-      }
-    }
-    return fields;
+      if (name) entry.name = name;
+      entry.agents = [...new Set([...(entry.agents || []), ...agents])];
+      return 'updated';
+    });
   };
+
 
   /** Effective profile by id (null when unknown or disabled). */
   const findProfile = (manifest, state, id) =>
@@ -905,18 +854,8 @@ export function createUiServer(opts = {}) {
           || (manifest.profiles || []).some(p => p.id === id)) {
         throw httpError(409, `profile '${id}' already exists`);
       }
-      const fields = pickProfileFields(body, manifest, state);
-      const profile = {
-        label: fields.label ?? id,
-        description: fields.description ?? '',
-        skills: fields.skills ?? [],
-        cliTools: fields.cliTools ?? [],
-        mcpServers: fields.mcpServers ?? [],
-        harnesses: fields.harnesses ?? ['omp'],
-        ...(fields.alias ? { alias: fields.alias } : {}),
-        ...(fields.includeCoreMcp === false ? { includeCoreMcp: false } : {}),
-        ...(fields.scope === 'project' ? { scope: 'project' } : {}),
-      };
+      const fields = validateProfileFields(body, manifest, state);
+      const profile = buildUserProfile(id, fields);
       state.profiles[id] = profile;
       saveProfilesState(state);
       sendJson(res, 201, {
@@ -978,7 +917,7 @@ export function createUiServer(opts = {}) {
         if (!isUser && !isKit) {
           throw httpError(404, `unknown profile: ${id}`);
         }
-        const fields = pickProfileFields(body, manifest, state);
+        const fields = validateProfileFields(body, manifest, state);
         if (isUser) {
           state.profiles[id] = { ...state.profiles[id], ...fields };
         } else {
@@ -1365,6 +1304,29 @@ export function createUiServer(opts = {}) {
       if (!fs.existsSync(projectRoot)) {
         throw httpError(400, `target path does not exist: ${projectRoot}`);
       }
+      // Already onboarded (state file present): there is nothing to
+      // scaffold. Register the path if needed, then answer with a sync
+      // plan instead so the UI lands on the sync review view — onboard
+      // on an existing project is the continuous-sync flow.
+      const adopted = body.scaffold !== true
+        && fs.existsSync(path.join(projectRoot, STATE_REL_PATH));
+      if (adopted) {
+        upsertRegistered(projectRoot, { name: body.name });
+        const result = dryRun(projectRoot);
+        const planId = crypto.randomUUID();
+        putPlan(planId, {
+          id: planId,
+          project: projectRoot,
+          plan: result.plan,
+          summary: result.summary,
+          createdAt: new Date().toISOString(),
+        });
+        sendJson(res, 200, {
+          kind: 'sync', planId, project: projectRoot,
+          plan: result.plan, summary: result.summary,
+        });
+        return;
+      }
       const rows = buildOnboardRows(projectRoot, {
         profile: body.profile || 'devin',
       }).rows;
@@ -1488,15 +1450,31 @@ export function createUiServer(opts = {}) {
       throw httpError(405, 'method not allowed');
     }
 
-    // POST /api/onboard/converge {planId, runner?} - start the async
-    // placeholder-fill job for a plan that already applied. The runner
-    // edits the project's generated files directly (unattended), so this
-    // is a background job the UI polls, not a request/response.
+    // POST /api/onboard/converge {planId | project, runner?} - start the
+    // async placeholder-fill job. planId converges an applied onboard
+    // plan; project converges an adopted project directly (the sync
+    // view's converge button — continuous sync needs the same staged
+    // fill without re-running an onboard plan). Runs as a background
+    // job the UI polls, not a request/response.
     if (method === 'POST' && pathname === '/api/onboard/converge') {
       const body = await readJsonBody(req);
-      const plan = getOnboardPlan(body.planId);
-      if (!Array.isArray(plan.applied)) {
-        throw httpError(400, 'plan has not been applied - apply first, then converge');
+      let plan;
+      if (body.project !== undefined) {
+        const projectRoot = resolveProjectParam(body.project);
+        if (!fs.existsSync(path.join(projectRoot, STATE_REL_PATH))) {
+          throw httpError(400,
+            'project is not onboarded (no .agents/onboarding-state.json) — run onboard first');
+        }
+        plan = {
+          id: `project:${projectRoot}`, target: projectRoot,
+          applied: [],
+          agent: listRunners().find(r => r.available)?.name || 'devin',
+        };
+      } else {
+        plan = getOnboardPlan(body.planId);
+        if (!Array.isArray(plan.applied)) {
+          throw httpError(400, 'plan has not been applied - apply first, then converge');
+        }
       }
       const runnerKey = body.runner || plan.resolveWith || plan.agent;
       const job = startConverge(plan, runnerKey);

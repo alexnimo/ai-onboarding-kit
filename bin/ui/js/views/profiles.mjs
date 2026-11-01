@@ -26,7 +26,7 @@ function checkboxGroup(name, entries, checked = new Set()) {
   const boxes = entries.map(([value, label]) => {
     const box = el('input', {
       type: 'checkbox', name, value,
-      checked: String(checked.has(value)),
+      checked: checked.has(value),
     });
     return { box, node: el('label', {}, box, ` ${label}`) };
   });

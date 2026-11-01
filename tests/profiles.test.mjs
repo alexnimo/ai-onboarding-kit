@@ -21,6 +21,8 @@ import {
   deleteProfileArtifacts,
   resolveServers,
   invokeStrings,
+  validateProfileFields,
+  buildUserProfile,
 } from '../bin/lib/profiles.mjs';
 import { mergedMcpConfig } from '../bin/lib/onboard-plan.mjs';
 
@@ -281,4 +283,75 @@ test('mergedMcpConfig: specialist-tier servers never merge into main config', ()
   assert.equal(out.mcpServers['chrome-devtools'], undefined);
   assert.equal(out.mcpServers.playwright, undefined);
   assert.deepEqual(added, ['semble']);
+});
+// ---------- alias planning + stale pruning ----------
+
+test('planProfile: project-scope without project still emits shell aliases', () => {
+  const home = tmp();
+  const profile = { ...PROFILE, harnesses: ['omp'], scope: 'project', alias: 'o-qa' };
+  const plan = planProfile(profile, MANIFEST, null, { home });
+  assert.ok(plan.warnings.some(w => w.includes('needs a project')),
+    'project-scope without project warns');
+  const sh = plan.artifacts.find(a => a.dest.endsWith(`aliases/${profile.id}.sh`));
+  assert.ok(sh, 'alias artifact planned even without a project');
+  assert.ok(sh.content.includes('o-qa'), 'alias name in the snippet');
+  const proj = plan.artifacts.find(a => a.dest.endsWith('mcp.json'));
+  assert.ok(proj.absPath.includes('<project>'),
+    'project artifacts stay placeholders for apply to skip');
+});
+
+test('applyProfilePlan: dropping profile.alias prunes stale alias files', () => {
+  const home = tmp();
+  const st = state();
+  const withAlias = { ...PROFILE, harnesses: ['omp'], alias: 'o-qa' };
+  applyProfilePlan(planProfile(withAlias, MANIFEST, null, { home }),
+    withAlias, st, { home });
+  const shPath = path.join(home, '.ai-onboarding-kit', 'aliases', 'qa-agent.sh');
+  assert.ok(fs.existsSync(shPath), 'alias file written on first sync');
+
+  const noAlias = { ...withAlias };
+  delete noAlias.alias;
+  const res = applyProfilePlan(planProfile(noAlias, MANIFEST, null, { home }),
+    noAlias, st, { home });
+  assert.ok(!fs.existsSync(shPath), 'stale alias file deleted');
+  assert.ok(res.some(r => r.action === 'deleted-stale-alias'));
+});
+
+test('applyProfilePlan: stale alias file with user edits is kept', () => {
+  const home = tmp();
+  const st = state();
+  const withAlias = { ...PROFILE, harnesses: ['omp'], alias: 'o-qa' };
+  applyProfilePlan(planProfile(withAlias, MANIFEST, null, { home }),
+    withAlias, st, { home });
+  const shPath = path.join(home, '.ai-onboarding-kit', 'aliases', 'qa-agent.sh');
+  fs.writeFileSync(shPath, '# user customization\n' + fs.readFileSync(shPath, 'utf8'));
+
+  const noAlias = { ...withAlias };
+  delete noAlias.alias;
+  applyProfilePlan(planProfile(noAlias, MANIFEST, null, { home }),
+    noAlias, st, { home });
+  assert.ok(fs.existsSync(shPath), 'user-modified alias file survives pruning');
+});
+
+// ---------- shared field validation ----------
+
+test('validateProfileFields: picks editable fields, validates against catalog', () => {
+  const st = state();
+  const fields = validateProfileFields({
+    label: 'X', alias: 'o-x', scope: 'project', copyAuth: true,
+    mcpServers: ['playwright'], harnesses: ['omp'], skills: [],
+    notAField: 'ignored',
+  }, MANIFEST, st);
+  assert.equal(fields.alias, 'o-x');
+  assert.equal(fields.scope, 'project');
+  assert.equal(fields.copyAuth, true);
+  assert.equal(fields.notAField, undefined);
+  assert.throws(() => validateProfileFields({ mcpServers: ['nope'] }, MANIFEST, st),
+    /unknown mcpServer/);
+  assert.throws(() => validateProfileFields({ alias: '1bad' }, MANIFEST, st),
+    /shell-safe/);
+  const p = buildUserProfile('x', fields);
+  assert.equal(p.alias, 'o-x');
+  assert.equal(p.scope, 'project');
+  assert.equal(p.copyAuth, true);
 });

@@ -768,3 +768,67 @@ test('onboard converge: staged diff, approve subset writes only those files', as
     { files: ['../../etc/passwd'] });
   assert.equal(badApprove.status, 400);
 });
+
+// Adopted projects: POST /api/onboard/plans must not produce a scaffold
+// plan for a project that already has .agents/onboarding-state.json —
+// onboard on an existing project IS the continuous-sync flow: the server
+// answers kind:'sync' with a sync plan and registers the path.
+test('onboard plans: adopted project returns a sync plan + registers', async () => {
+  const dir = path.join(PROJ_DIR, 'adopted-proj');
+  makeProject('adopted-proj');
+  fs.mkdirSync(dir, { recursive: true });
+  writeProj(dir, 'AGENTS.md', '# mine\n');
+  writeProj(dir, '.agents/onboarding-state.json', JSON.stringify({
+    schemaVersion: 1, kitCommit: 'x', manifestHash: 'x', artifacts: {},
+  }));
+  // Drop the registry entry — the endpoint must re-register adopted paths.
+  await api('DELETE', `/api/projects?path=${encodeURIComponent(dir)}`);
+
+  const res = await api('POST', '/api/onboard/plans',
+    { target: dir, profile: 'devin' });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.kind, 'sync', 'adopted target answers a sync plan');
+  assert.ok(res.body.planId, 'sync plan stored for the review view');
+  assert.ok(Array.isArray(res.body.plan), 'sync plan rows present');
+  assert.ok(readRegistry().projects.some(p => p.path === dir),
+    'adopted project was registered');
+
+  // scaffold:true forces the old scaffold plan even for adopted projects.
+  const forced = await api('POST', '/api/onboard/plans',
+    { target: dir, profile: 'devin', scaffold: true });
+  assert.equal(forced.status, 200, JSON.stringify(forced.body));
+  assert.notEqual(forced.body.kind, 'sync', 'scaffold flag bypasses routing');
+});
+
+// Project-based converge: POST /api/onboard/converge {project} starts the
+// same staged job for adopted projects (the sync view's converge button);
+// non-onboarded targets are rejected.
+test('onboard converge: {project} runs the staged job on adopted projects', async () => {
+  const dir = path.join(PROJ_DIR, 'converge-adopted');
+  fs.mkdirSync(dir, { recursive: true });
+  writeProj(dir, 'AGENTS.md', '# {{PROJECT_NAME}}\n');
+  writeProj(dir, '.agents/onboarding-state.json', JSON.stringify({
+    schemaVersion: 1, kitCommit: 'x', manifestHash: 'x', artifacts: {},
+  }));
+
+  const start = await api('POST', '/api/onboard/converge',
+    { project: dir, runner: 'testagent' });
+  assert.equal(start.status, 202, JSON.stringify(start.body));
+
+  let job = start.body;
+  for (let i = 0; i < 30 && job.status === 'running'; i++) {
+    await new Promise(r => setTimeout(r, 250));
+    job = (await api('GET', `/api/onboard/jobs/${job.id}`)).body;
+  }
+  assert.equal(job.status, 'done', `job ended ${job.status}: ${job.error}`);
+  assert.ok(job.changes.some(c => c.file === 'AGENTS.md'),
+    'staged fill produced changes');
+  assert.ok(!fs.existsSync(path.join(dir, '.converge-ran')),
+    'project untouched before approve');
+
+  // A project with no state file cannot converge.
+  const foreign = path.join(PROJ_DIR, 'foreign-proj');
+  fs.mkdirSync(foreign, { recursive: true });
+  assert.equal((await api('POST', '/api/onboard/converge',
+    { project: foreign, runner: 'testagent' })).status, 400);
+});

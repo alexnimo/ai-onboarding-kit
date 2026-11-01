@@ -9,6 +9,7 @@ import { api } from '../api.mjs';
 import { el, basename } from '../dom.mjs';
 import { toast } from '../toast.mjs';
 import { renderDiff, renderThreePane } from './diffview.mjs';
+import { renderConverge } from './converge.mjs';
 import {
   groupPlan, initialDispositions, applyGate, buildPayload, tallyDispositions,
   countByAction, resultCounts, describeLastResult,
@@ -43,6 +44,7 @@ export function renderSync(projectPath) {
     open: new Map(), // dest -> 'diff' | 'pane'
     diffs: new Map(), // dest -> unified diff text
     merges: new Map(), // dest -> {data} | {error}
+    convergeNode: renderConverge({ project: projectPath }),
   };
   const banner = el('div', { class: 'banner-region' });
   const body = el('div', { class: 'sync-body' });
@@ -157,6 +159,10 @@ export function renderSync(projectPath) {
         dataset: { key: 'apply' },
         onclick: apply,
       }, state.busy ? 'Applying...' : 'Apply — write changes')));
+
+    // Staged AI converge: fills {{placeholders}} / converges docs — on
+    // every adopted project, not only fresh onboards.
+    nodes.push(state.convergeNode);
 
     body.replaceChildren(...nodes);
     if (state.focusKey) {

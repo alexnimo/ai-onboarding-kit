@@ -74,6 +74,126 @@ export function saveProfileState(state) {
   });
 }
 
+
+// ---------- catalog + field validation ----------
+// Shared by the UI server (POST/PUT /api/profiles) and the CLI
+// (profile --create/--update) so both surfaces accept exactly the same
+// fields and the same catalog constraints. Errors carry .status=400 so
+// the HTTP layer surfaces them as 400 and the CLI can print the message.
+
+/** Fields writable on user profiles or kit overrides. */
+export const PROFILE_EDITABLE = ['label', 'description', 'skills', 'cliTools',
+  'mcpServers', 'harnesses', 'alias', 'disabled', 'copyAuth', 'includeCoreMcp', 'scope'];
+export const PROFILE_LIST_FIELDS = ['skills', 'cliTools', 'mcpServers', 'harnesses'];
+
+function badField(message) {
+  const err = new Error(message);
+  err.status = 400;
+  err.expose = true;
+  return err;
+}
+
+/**
+ * Catalog names the create/edit surfaces validate against: manifest +
+ * user-declared custom items (state.custom).
+ */
+export function profileCatalog(manifest, state) {
+  return {
+    skills: [
+      ...(manifest.skills || []).map(s => s.name),
+      ...(manifest.templateSkills || []).map(t => t.dest),
+      ...(state?.custom?.skills || []).map(s => s.name),
+    ],
+    cliTools: (manifest.cliTools || []).map(t => t.name),
+    mcpServers: [
+      ...(manifest.mcpServers || []).map(s => ({
+        name: s.name, tier: s.tier || 'core', required: !!s.required,
+      })),
+      ...(state?.custom?.mcpServers || []).map(s => ({
+        name: s.name, tier: s.tier || 'specialist', required: false, custom: true,
+      })),
+    ],
+    harnesses: Object.keys(manifest.agentProfiles || {}),
+    custom: {
+      skills: state?.custom?.skills || [],
+      mcpServers: state?.custom?.mcpServers || [],
+    },
+  };
+}
+
+/**
+ * Validate + pick editable profile fields off a request/options object.
+ * Throws err.status=400 on bad types or names outside the catalog.
+ *
+ * @param {object} body Raw field values (only PROFILE_EDITABLE keys read).
+ * @param {object} manifest Parsed onboard.manifest.json.
+ * @param {object} state Profile state (for custom catalog items).
+ * @returns {object} Validated fields, only keys that were present.
+ */
+export function validateProfileFields(body, manifest, state) {
+  const fields = {};
+  for (const key of PROFILE_EDITABLE) {
+    if (body[key] === undefined) continue;
+    if (PROFILE_LIST_FIELDS.includes(key)) {
+      if (!Array.isArray(body[key])
+          || body[key].some(v => typeof v !== 'string')) {
+        throw badField(`${key} must be an array of strings`);
+      }
+      fields[key] = [...new Set(body[key])];
+    } else if (key === 'scope') {
+      if (body[key] !== 'global' && body[key] !== 'project') {
+        throw badField("scope must be 'global' or 'project'");
+      }
+      fields[key] = body[key];
+    } else if (key === 'disabled' || key === 'copyAuth'
+               || key === 'includeCoreMcp') {
+      fields[key] = body[key] === true;
+    } else {
+      if (typeof body[key] !== 'string') {
+        throw badField(`${key} must be a string`);
+      }
+      if (key === 'alias' && body[key]
+          && !/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(body[key])) {
+        throw badField(
+          'alias must be a shell-safe name (letters, digits, -, _)');
+      }
+      fields[key] = body[key];
+    }
+  }
+  const catalog = profileCatalog(manifest, state);
+  const mcpNames = new Set(catalog.mcpServers.map(s => s.name));
+  for (const name of fields.mcpServers || []) {
+    if (!mcpNames.has(name)) throw badField(`unknown mcpServer: ${name}`);
+  }
+  const harnessNames = new Set(catalog.harnesses);
+  for (const name of fields.harnesses || []) {
+    if (!harnessNames.has(name)) throw badField(`unknown harness: ${name}`);
+  }
+  const skillNames = new Set(catalog.skills);
+  for (const name of fields.skills || []) {
+    if (!skillNames.has(name)) throw badField(`unknown skill: ${name}`);
+  }
+  return fields;
+}
+
+/**
+ * Assemble a user-profile record from validated fields. Only fields that
+ * differ from defaults are stored, so records stay diffable.
+ */
+export function buildUserProfile(id, fields) {
+  return {
+    label: fields.label ?? id,
+    description: fields.description ?? '',
+    skills: fields.skills ?? [],
+    cliTools: fields.cliTools ?? [],
+    mcpServers: fields.mcpServers ?? [],
+    harnesses: fields.harnesses ?? ['omp'],
+    ...(fields.alias ? { alias: fields.alias } : {}),
+    ...(fields.copyAuth ? { copyAuth: true } : {}),
+    ...(fields.includeCoreMcp === false ? { includeCoreMcp: false } : {}),
+    ...(fields.scope === 'project' ? { scope: 'project' } : {}),
+  };
+}
 /**
  * Effective profile list = kit manifest profiles overlaid by user overrides
  * plus user-defined profiles. Disabled profiles are excluded. Custom MCP
@@ -170,10 +290,13 @@ export function planProfile(profile, manifest, projectRoot = null, { home = os.h
       warnings.push(`harness '${h}' is core-only — no specialist artifacts`);
       continue;
     }
+    // Project-scope without a project: project artifacts become
+    // '<project>' placeholders apply() skips, but user-scope artifacts
+    // (shell aliases) must still be emitted — they don't depend on a
+    // project being selected.
     if (scope === 'project' && !projectRoot) {
       warnings.push(
         `project-scope profile '${profile.id}' needs a project selected to write artifacts`);
-      continue;
     }
     emitForHarness({ profile, spec, mcpEntries, servers, artifacts, projectRoot, home, scope, catalogServers });
   }
@@ -471,10 +594,28 @@ export function applyProfilePlan(plan, profile, state, { home = os.homedir(), pr
       state.artifacts[key] = { hash: sha256(a.content), managed: true };
     }
   }
+  // Stale alias artifacts: an alias that was removed (or whose harness was
+  // dropped) leaves recorded files under ~/.ai-onboarding-kit/aliases that
+  // the rc block would still source. Delete them only when the bytes still
+  // match the recorded hash (user-edited files are kept).
+  const aliasDir = `${path.sep}.ai-onboarding-kit${path.sep}aliases`;
+  const planPaths = new Set(plan.artifacts.map(a => a.absPath));
+  for (const [key, rec] of Object.entries(state.artifacts || {})) {
+    const [pid, ...rest] = key.split(':');
+    if (pid !== profile.id) continue;
+    const abs = rest.join(':');
+    if (!abs.includes(aliasDir) || planPaths.has(abs)) continue;
+    if (fs.existsSync(abs)
+        && sha256(fs.readFileSync(abs, 'utf8')) === rec?.hash) {
+      fs.unlinkSync(abs);
+      delete state.artifacts[key];
+      results.push({ dest: abs, action: 'deleted-stale-alias' });
+    }
+  }
+
   // If any shell-alias artifact was written, make sure the user's rc file
   // sources the alias dir so the alias is usable without manual setup.
-  if (plan.artifacts.some(a => a.absPath.includes(
-      `${path.sep}.ai-onboarding-kit${path.sep}aliases`))) {
+  if (plan.artifacts.some(a => a.absPath.includes(aliasDir))) {
     results.push(...ensureAliasBlock({ home }));
   }
   // Opt-in: reuse the default profile's provider credentials + settings for

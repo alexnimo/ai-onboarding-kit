@@ -264,7 +264,11 @@ function onboardForm() {
         agent: runnerSel.value || undefined,
         installSkills: skillsCheck.checked,
       });
-      location.hash = `#/onboard?plan=${res.planId}`;
+      // Adopted projects: the server returns a sync plan instead of a
+      // scaffold plan — onboard on an existing project IS the sync flow.
+      location.hash = res.kind === 'sync'
+        ? `#/sync?path=${encodeURIComponent(res.project)}`
+        : `#/onboard?plan=${res.planId}`;
     } catch (err) {
       toast(`Onboard plan failed: ${err.message}`, 'error');
       btn.disabled = false;

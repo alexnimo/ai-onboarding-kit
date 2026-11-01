@@ -58,6 +58,7 @@ import {
   mergeFactRows,
 } from './lib/onboard-plan.mjs';
 import { startUiServer } from './lib/ui-server.mjs';
+import { dryRun } from './lib/sync-engine.mjs';
 import {
   effectiveProfiles,
   planProfile,
@@ -67,6 +68,8 @@ import {
   skillStatus,
   loadProfileState,
   saveProfileState,
+  validateProfileFields,
+  buildUserProfile,
 } from './lib/profiles.mjs';
 
 // ---------- subcommands ----------
@@ -448,18 +451,79 @@ function commandInjectRegions(opts) {
 }
 
 /**
+ * Registry upsert for onboard flows: adopted projects get registered the
+ * first time onboard is re-run on them so sync results have an entry to
+ * land on.
+ */
+function upsertRegistryEntry(projectRoot, { name = null, agents = [] } = {}) {
+  const now = new Date().toISOString();
+  updateRegistry(reg => {
+    const entry = reg.projects.find(p => p.path === projectRoot);
+    if (!entry) {
+      reg.projects.push({
+        name: name || path.basename(projectRoot),
+        path: projectRoot,
+        agents,
+        onboardedAt: now,
+        lastSyncAt: now,
+        overrides: { skip: [], pins: {} },
+      });
+      return true;
+    }
+    if (name) entry.name = name;
+    entry.agents = [...new Set([...(entry.agents || []), ...agents])];
+    return true;
+  });
+}
+
+/**
+ * Run the converge agent in a STAGED copy of the project, print the diff,
+ * then (unless dryOnly) write the changed files back. Shared by scaffold
+ * apply and the adopted-project sync path.
+ */
+async function runConverge(projectRoot, runnerKey, applied, { dryOnly = false } = {}) {
+  const { buildConvergePrompt, spawnRunner, stageTree,
+    diffStagedTree, applyStagedFile, rmStaging } =
+    await import('./lib/agent-spawn.mjs');
+  const staging = stageTree(projectRoot);
+  console.log(`Converging with ${runnerKey} in staged copy ${staging}...`);
+  const prompt = buildConvergePrompt({
+    target: staging, runner: runnerKey, applied,
+  });
+  const out = spawnRunner(runnerKey, prompt, { cwd: staging });
+  if (!out.ok) {
+    rmStaging(staging);
+    throw new Error(`converge failed: ${out.error}`);
+  }
+  const changes = diffStagedTree(staging, projectRoot);
+  if (!changes.length) console.log('Converge produced no changes.');
+  for (const c of changes) console.log(c.diffText);
+  if (dryOnly) {
+    console.log(`--converge-dry: ${changes.length} change(s) previewed, nothing written.`);
+  } else {
+    for (const c of changes.filter(c => c.action !== 'deleted')) {
+      applyStagedFile(staging, projectRoot, c.file);
+    }
+    console.log(`Converge applied ${changes.filter(c => c.action !== 'deleted').length} file(s).`);
+  }
+  rmStaging(staging);
+}
+
+/**
  * onboard --target <path> [--profile <profile>] [--agent <runner>]
  *         [--resolve-with <runner>] [--converge [--converge-with <runner>]
- *         | --converge-dry] [--apply] [--json]
+ *         | --converge-dry] [--apply] [--json] [--scaffold]
  *         [--install-skills] [--update-skills] [--force] [--manifest <path>]
  *
- * Builds the onboarding plan (node rows from onboard-plan.mjs merged with
- * scaffold --dry-run fact rows), then:
- *   --json    print {plan, summary} and exit (writes nothing)
- *   --apply   write accepted-artifact list and run the real scaffold
- *   default   serve the SPA at #/onboard?plan=<id> and open the browser
+ * New project (no .agents/onboarding-state.json): builds the scaffold
+ * plan, then --json prints it, --apply runs the scaffold, otherwise the
+ * review SPA at #/onboard?plan=<id> is served.
  *
- * Registry entries are created only on apply - never during planning.
+ * Already-onboarded project (state file present): onboard IS the
+ * continuous-sync flow — the project is registered if missing, then
+ * --json prints the sync dry-run, --apply runs the real sync (+converge
+ * when flagged), otherwise the server is started and the sync review
+ * URL printed. --scaffold forces the scaffold plan even then.
  *
  * @param {Record<string, *>} opts Parsed flags.
  */
@@ -469,6 +533,55 @@ async function commandOnboard(opts) {
   const projectRoot = path.resolve(String(target));
   if (!fs.existsSync(projectRoot)) {
     throw new Error(`target path does not exist: ${projectRoot}`);
+  }
+
+  const adopted = opts.scaffold !== true
+    && fs.existsSync(path.join(projectRoot, STATE_REL_PATH));
+  if (adopted) {
+    if (opts.json) {
+      const result = dryRun(projectRoot, {
+        updateSkills: !!opts['update-skills'],
+        installSkills: !!opts['install-skills'],
+      });
+      console.log(JSON.stringify({
+        kind: 'sync', target: projectRoot,
+        plan: result.plan, summary: result.summary,
+      }, null, 2));
+      return;
+    }
+    upsertRegistryEntry(projectRoot);
+    if (opts.apply) {
+      commandSync({
+        project: projectRoot,
+        'update-skills': opts['update-skills'],
+        'install-skills': opts['install-skills'],
+        force: opts.force,
+      });
+      const runnerKey = opts['converge-with']
+        || ((opts.converge || opts['converge-dry'])
+          ? (opts['resolve-with'] || opts.agent || 'devin') : null);
+      if (runnerKey) {
+        const applied = dryRun(projectRoot).plan
+          .filter(r => !['skip', 'project-only', 'unadopted'].includes(r.action)
+            && r.artifact !== '(project)')
+          .map(r => r.artifact);
+        await runConverge(projectRoot, runnerKey, applied,
+          { dryOnly: !!opts['converge-dry'] });
+      }
+      return;
+    }
+    // Review mode: the sync view does its own dry-run via the plan API,
+    // so the server just needs to be up.
+    const { server, url } = await startUiServer({});
+    const shutdown = () => {
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 500).unref();
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+    console.log(`Project already onboarded - this is a sync. Review UI: ${url}/#/sync?path=${encodeURIComponent(projectRoot)}`);
+    console.log('Press Ctrl-C to stop.');
+    return;
   }
   const profile = opts.profile || 'devin';
   const manifestPath = resolveManifestPath(opts.manifest);
@@ -529,41 +642,17 @@ async function commandOnboard(opts) {
     fs.rmSync(path.dirname(onlyFile), { recursive: true, force: true });
     if (res.status !== 0) throw new Error(`scaffold apply exited ${res.status}`);
 
-    // --converge / --converge-with: run the onboarding agent in a STAGED
-    // copy of the project, print the resulting diff, then write all
-    // changed files back. --converge-dry prints the diff and writes
-    // nothing (the staging dir is cleaned up). The UI's converge panel
-    // offers per-file approval; the CLI is all-or-nothing.
+    // --converge / --converge-with: agent runs in a STAGED copy; the
+    // diff is printed, then changed files are written back (unless
+    // --converge-dry). The UI's converge panel offers per-file approval;
+    // the CLI is all-or-nothing.
     const runnerKey = opts['converge-with']
       || ((opts.converge || opts['converge-dry'])
         ? (opts['resolve-with'] || opts.agent || 'devin') : null);
     if (runnerKey) {
-      const { buildConvergePrompt, spawnRunner, stageTree,
-        diffStagedTree, applyStagedFile, rmStaging } =
-        await import('./lib/agent-spawn.mjs');
-      const staging = stageTree(projectRoot);
-      console.log(`Converging with ${runnerKey} in staged copy ${staging}...`);
-      const prompt = buildConvergePrompt({
-        target: staging, runner: runnerKey,
-        applied: plan.map(r => r.artifact).filter(a => a !== '(project)'),
-      });
-      const out = spawnRunner(runnerKey, prompt, { cwd: staging });
-      if (!out.ok) {
-        rmStaging(staging);
-        throw new Error(`converge failed: ${out.error}`);
-      }
-      const changes = diffStagedTree(staging, projectRoot);
-      if (!changes.length) console.log('Converge produced no changes.');
-      for (const c of changes) console.log(c.diffText);
-      if (opts['converge-dry']) {
-        console.log(`--converge-dry: ${changes.length} change(s) previewed, nothing written.`);
-      } else {
-        for (const c of changes.filter(c => c.action !== 'deleted')) {
-          applyStagedFile(staging, projectRoot, c.file);
-        }
-        console.log(`Converge applied ${changes.filter(c => c.action !== 'deleted').length} file(s).`);
-      }
-      rmStaging(staging);
+      await runConverge(projectRoot, runnerKey,
+        plan.map(r => r.artifact).filter(a => a !== '(project)'),
+        { dryOnly: !!opts['converge-dry'] });
       return;
     }
     console.log('Onboarding applied. Run again with --converge (or converge in the UI) to fill {{placeholders}}.');
@@ -607,7 +696,7 @@ function commandProfile(opts) {
   const state = loadProfileState();
   const profiles = effectiveProfiles(manifest, state);
 
-  if (opts.list || (!opts.plan && !opts.sync && !opts.create && !opts.delete)) {
+  if (opts.list || (!opts.plan && !opts.sync && !opts.create && !opts.update && !opts.delete)) {
     const rows = profiles.map(p => ({
       id: p.id,
       origin: p.origin,
@@ -626,22 +715,52 @@ function commandProfile(opts) {
     return;
   }
 
+  // Field flags shared by --create and --update. Comma-separated lists;
+  // booleans accept --no-<flag> to clear. Same fields as the UI's
+  // POST/PUT /api/profiles (validated identically).
+  const fieldsFromOpts = () => {
+    const bool = (on, off) => (opts[on] !== undefined ? true
+      : opts[off] !== undefined ? false : undefined);
+    const body = {
+      label: opts.label, description: opts.description,
+      skills: opts.skills ? String(opts.skills).split(',') : undefined,
+      cliTools: opts['cli-tools'] ? String(opts['cli-tools']).split(',')
+        : (opts.cliTools ? String(opts.cliTools).split(',') : undefined),
+      mcpServers: opts.mcps ? String(opts.mcps).split(',') : undefined,
+      harnesses: opts.harnesses ? String(opts.harnesses).split(',') : undefined,
+      alias: opts.alias,
+      copyAuth: bool('copy-auth', 'no-copy-auth'),
+      includeCoreMcp: bool('core-mcp', 'no-core-mcp'),
+      scope: opts.scope,
+      disabled: bool('disabled', 'no-disabled'),
+    };
+    return validateProfileFields(body, manifest, state);
+  };
+
   if (opts.create) {
     const id = String(opts.create);
     if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) throw new Error(`invalid profile id '${id}' (lowercase letters, digits, dashes)`);
     if (profiles.some(p => p.id === id)) throw new Error(`profile '${id}' already exists`);
-    const p = {
-      label: opts.label || id,
-      description: opts.description || '',
-      skills: opts.skills ? String(opts.skills).split(',') : [],
-      cliTools: opts.cliTools ? String(opts.cliTools).split(',') : [],
-      mcpServers: opts.mcps ? String(opts.mcps).split(',') : [],
-      harnesses: opts.harnesses ? String(opts.harnesses).split(',') : ['omp'],
-      ...(opts.scope === 'project' ? { scope: 'project' } : {}),
-    };
+    const p = buildUserProfile(id, fieldsFromOpts());
     state.profiles[id] = p;
     saveProfileState(state);
-    console.log(`Created user profile '${id}'. Run: node bin/onboard.mjs profile --sync ${id} --project <path>`);
+    console.log(`Created user profile '${id}'. Run: node bin/onboard.mjs profile --sync ${id}`);
+    return;
+  }
+
+  if (opts.update) {
+    // User profiles edit in place; kit profiles record overrides
+    // ({disabled:true} also hides the profile) — same semantics as
+    // PUT /api/profiles/:id. Sync afterwards to materialize changes.
+    const id = String(opts.update);
+    const isUser = isObject(state.profiles[id]);
+    const isKit = (manifest.profiles || []).some(p => p.id === id);
+    if (!isUser && !isKit) throw new Error(`unknown profile '${id}' — run profile --list`);
+    const fields = fieldsFromOpts();
+    if (isUser) state.profiles[id] = { ...state.profiles[id], ...fields };
+    else state.overrides[id] = { ...state.overrides[id], ...fields };
+    saveProfileState(state);
+    console.log(`Updated ${isKit ? 'kit' : 'user'} profile '${id}'. Run: node bin/onboard.mjs profile --sync ${id}`);
     return;
   }
 
@@ -694,9 +813,10 @@ const USAGE = `Usage:
   node bin/onboard.mjs list [--json]
   node bin/onboard.mjs record-state --path P [--manifest <path>] [--dry-run]
   node bin/onboard.mjs onboard --target <path> [--profile <profile>] [--agent <runner>]
-                             [--resolve-with <runner>] [--apply] [--json]
+                             [--resolve-with <runner>] [--apply] [--json] [--scaffold]
                              [--converge [--converge-with <runner>] | --converge-dry]
                              [--install-skills] [--update-skills] [--force]
+                             (adopted projects: runs sync instead of scaffold)
   node bin/onboard.mjs inject-regions --path P [--manifest <path>] [--dry-run]
   node bin/onboard.mjs sync [--project NAME] [--dry-run] [--force] [--json]
                           [--update-skills] [--install-skills] [--adopt] [--prune]
@@ -706,9 +826,12 @@ const USAGE = `Usage:
   node bin/onboard.mjs profile --list [--json]
   node bin/onboard.mjs profile --plan <id> [--project <path>] [--json]
   node bin/onboard.mjs profile --sync <id> [--project <path>]
-  node bin/onboard.mjs profile --create <id> --label <txt>
+  node bin/onboard.mjs profile --create <id> [--label <txt>]
                           [--skills a,b] [--mcps a,b] [--harnesses a,b]
-                          [--description <txt>] [--scope global|project]
+                          [--alias <name>] [--scope global|project]
+                          [--copy-auth] [--no-core-mcp] [--description <txt>]
+  node bin/onboard.mjs profile --update <id> (same field flags as --create,
+                          plus [--disabled|--no-disabled]; kit profiles store overrides)
   node bin/onboard.mjs profile --delete <id>
   node bin/onboard.mjs ui [--port 4173]`;
 
