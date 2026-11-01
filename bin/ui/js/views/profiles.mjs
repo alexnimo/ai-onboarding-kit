@@ -37,7 +37,8 @@ function checkboxGroup(name, entries, checked = new Set()) {
 }
 
 export function renderProfiles() {
-  const state = { profiles: [], catalog: null, plans: {}, busy: false, editing: null, projects: [], project: '' };
+  const state = { profiles: [], catalog: null, plans: {}, busy: false, editing: null, projects: [],
+    project: localStorage.getItem('aok.profiles.project') ?? '' };
   const body = el('div', { class: 'sync-body' });
   const root = el('section', { class: 'sync-view', 'aria-labelledby': 'profiles-title' },
     el('header', { class: 'toolbar' },
@@ -60,6 +61,15 @@ export function renderProfiles() {
       body.replaceChildren(el('p', { class: 'bad', role: 'alert' },
         `Profiles failed to load: ${err.message}`));
       return;
+    }
+    // Default to a previously chosen project (or the only registered one)
+    // so the sync button doesn't silently scope to "Kit home" — the
+    // skip-no-project outcome is what reads as "nothing applied".
+    if (!state.project && state.projects.length === 1) {
+      state.project = state.projects[0].path;
+    }
+    if (state.project && !state.projects.some(p => p.path === state.project)) {
+      state.project = '';
     }
     render();
   }
@@ -143,7 +153,10 @@ export function renderProfiles() {
         el('label', {}, 'Project ',
           el('select', {
             name: 'project',
-            onchange: e => { state.project = e.target.value; },
+            onchange: e => {
+              state.project = e.target.value;
+              localStorage.setItem('aok.profiles.project', state.project);
+            },
           },
             el('option', { value: '', selected: !state.project }, 'Kit home (default)'),
             state.projects.map(p => el('option', {

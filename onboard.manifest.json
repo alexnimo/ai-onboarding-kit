@@ -129,7 +129,7 @@
       "hint": "Code search — install via MCP config",
       "config": {
         "command": "uvx",
-        "args": ["--from", "semble[mcp]", "semble"],
+        "args": ["--from", "semble[mcp]==0.7.1", "semble"],
         "env": {}
       }
     },
@@ -140,7 +140,7 @@
       "hint": "Impact analysis graph — install via MCP config",
       "config": {
         "command": "uvx",
-        "args": ["code-review-graph", "serve"],
+        "args": ["code-review-graph==2.3.9", "serve"],
         "env": {}
       }
     },
@@ -151,7 +151,7 @@
       "hint": "Session memory + FTS5 knowledge base — install via MCP config (stdio server: `context-mode` with no args)",
       "config": {
         "command": "npx",
-        "args": ["-y", "context-mode@latest"],
+        "args": ["-y", "context-mode@1.0.169"],
         "env": {}
       }
     },

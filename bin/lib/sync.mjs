@@ -37,7 +37,10 @@ import {
 import { buildManagedPlan } from './sync-utils.mjs';
 import { syncSkills } from './sync-skills.mjs';
 import { openProject, syncDests, finalizeProject } from './sync-engine.mjs';
-
+import {
+  effectiveProfiles, planProfile, applyProfilePlan,
+  loadProfileState, saveProfileState,
+} from './profiles.mjs';
 /** All actions a report row can carry. */
 export const ACTIONS = new Set([
   'fast-forward', 'merged', 'conflict', 'skip', 'project-only',
@@ -58,8 +61,39 @@ function syncProject(entry, ctx) {
 
   syncDests(pctx);
   pr.skills = syncSkills(pctx);
+  if (ctx.syncProfiles !== false) {
+    pr.profiles = syncProfiles(entry.path, ctx);
+  }
   finalizeProject(pctx);
   return pr;
+}
+
+/**
+ * Materialize every enabled specialist profile's artifacts into the
+ * project (and user scope): agent docs, merged MCP configs, aliases.
+ * Kept inside project sync so `sync` is the single command that brings a
+ * project fully up to date; --no-profiles opts out. Dry-run plans only.
+ */
+function syncProfiles(projectRoot, ctx) {
+  const rows = [];
+  const state = ctx.profilesState ??= loadProfileState();
+  let dirty = false;
+  for (const profile of effectiveProfiles(ctx.manifest, state)) {
+    if (profile.disabled) continue;
+    const plan = planProfile(profile, ctx.manifest, projectRoot);
+    if (ctx.dryRun) {
+      for (const a of plan.artifacts) {
+        if (a.absPath.includes('<project>')) continue;
+        rows.push({ profile: profile.id, dest: a.dest, action: 'materialize' });
+      }
+      continue;
+    }
+    const results = applyProfilePlan(plan, profile, state, { projectRoot });
+    dirty = true;
+    for (const r of results) rows.push({ profile: profile.id, ...r });
+  }
+  if (dirty) saveProfileState(state);
+  return rows;
 }
 // ---------- report ----------
 
@@ -90,11 +124,24 @@ function printHuman(report) {
       const missing = p.skills.filter(s => s.status === 'missing').map(s => s.name);
       lines.push(`  skills: ${Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(', ')}${missing.length ? ` (missing: ${missing.join(', ')})` : ''}`);
     }
+    if (p.profiles?.length) {
+      // Profile artifact writes (agent docs, merged MCP configs, aliases).
+      // Compact: group by action so a no-op sync reads as one line.
+      const byAct = {};
+      for (const r of p.profiles) byAct[r.action] = (byAct[r.action] || 0) + 1;
+      const writes = p.profiles.filter(r =>
+        !['exists-skip', 'skip-no-project'].includes(r.action));
+      lines.push(`  profiles: ${Object.entries(byAct).map(([k, v]) => `${v} ${k}`).join(', ')}`
+        + (writes.length ? ` — ${writes.map(r => `${r.profile}: ${r.dest}`).slice(0, 3).join(', ')}`
+          + (writes.length > 3 ? ` +${writes.length - 3} more` : '') : ''));
+    }
     lines.push('');
   }
   const parts = Object.entries(report.summary.byAction).filter(([, n]) => n > 0);
-  lines.push(`Summary: ${parts.length ? parts.map(([k, n]) => `${n} ${k}`).join(', ') : 'no actions'} across ${report.projects.length} project(s)`);
-  lines.push(`Exit code: ${report.exitCode}${report.exitCode === 2 ? ' (conflicts require resolution)' : ''}`);
+  const changed = report.projects.reduce((n, p) =>
+    n + p.files.filter(f => !['skip', 'exists-skip', 'project-only'].includes(f.action)).length, 0);
+  lines.push(`Summary: ${parts.length ? parts.map(([k, n]) => `${n} ${k}`).join(', ') : 'no actions'}`
+    + ` across ${report.projects.length} project(s)${changed === 0 ? ' — nothing to write' : ''}`);
   console.log(lines.join('\n'));
 }
 
@@ -103,10 +150,12 @@ function printHuman(report) {
 /**
  * sync [--project NAME] [--dry-run] [--force] [--json] [--update-skills]
  *       [--install-skills] [--adopt] [--prune] [--restore-deleted]
- *       [--manifest <path>]
+ *       [--no-profiles] [--manifest <path>]
  *
  * Walk all (or one) registered projects and re-apply the current kit with
- * three-way merge logic against the recorded base. Exit 2 on conflicts.
+ * three-way merge logic against the recorded base, then materialize every
+ * enabled specialist profile into the project (agent docs, merged MCP
+ * configs, aliases — --no-profiles skips). Exit 2 on conflicts.
  * --adopt baselines projects with no state file (config artifacts only -
  * templates/rules stay project-owned). --prune deletes retired dests whose
  * project bytes still equal the recorded base.
@@ -124,6 +173,9 @@ export function commandSync(opts) {
     adopt: !!opts.adopt,
     prune: !!opts.prune,
     restoreDeleted: !!opts['restore-deleted'],
+    // Profile materialization is part of project sync by default (the
+    // single "bring this project current" command); --no-profiles opts out.
+    syncProfiles: !opts['no-profiles'],
   };
   const asJson = !!opts.json;
 

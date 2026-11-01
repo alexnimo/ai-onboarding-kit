@@ -91,6 +91,7 @@ const MANIFEST = {
     testagent: {
       detect: 'node',
       spawn: `node ${path.join(TMP, 'kit', 'fake-agent.cjs').split(path.sep).join('/')} {PROMPT_FILE}`,
+      modelFlag: '--model',   // exercises the model pin plumbing end-to-end
     },
   },
 };
@@ -172,6 +173,8 @@ before(async () => {
     "  fs.writeFileSync(p, fs.readFileSync(p, 'utf8').split('{{PROJECT_NAME}}').join('ConvergedProject'));",
     "}",
     "fs.writeFileSync(path.join(process.cwd(), '.converge-ran'), 'yes');",
+    "// Record argv so tests can assert the --model pin reached the runner.",
+    "fs.writeFileSync(path.join(process.cwd(), '.converge-argv'), JSON.stringify(process.argv.slice(2)));",
     "console.log('fake converge done');",
     "",
   ].join('\n'));
@@ -831,4 +834,66 @@ test('onboard converge: {project} runs the staged job on adopted projects', asyn
   fs.mkdirSync(foreign, { recursive: true });
   assert.equal((await api('POST', '/api/onboard/converge',
     { project: foreign, runner: 'testagent' })).status, 400);
+});
+
+// Model pin: POST /api/onboard/converge {model} must reach the runner argv
+// via the manifest's modelFlag (regression: converge silently ran the
+// runner's default model with no way to pick one).
+test('onboard converge: model flag is appended to runner argv', async () => {
+  const dir = path.join(PROJ_DIR, 'converge-model');
+  fs.mkdirSync(dir, { recursive: true });
+  writeProj(dir, 'AGENTS.md', '# {{PROJECT_NAME}}\n');
+  writeProj(dir, '.agents/onboarding-state.json', JSON.stringify({
+    schemaVersion: 1, kitCommit: 'x', manifestHash: 'x', artifacts: {},
+  }));
+
+  const start = await api('POST', '/api/onboard/converge',
+    { project: dir, runner: 'testagent', model: 'swe-2-high' });
+  assert.equal(start.status, 202, JSON.stringify(start.body));
+  assert.equal(start.body.model, 'swe-2-high');
+
+  let job = start.body;
+  for (let i = 0; i < 30 && job.status === 'running'; i++) {
+    await new Promise(r => setTimeout(r, 250));
+    job = (await api('GET', `/api/onboard/jobs/${job.id}`)).body;
+  }
+  assert.equal(job.status, 'done', `job ended ${job.status}: ${job.error}`);
+
+  const apr = await api('POST', `/api/onboard/jobs/${job.id}/approve`,
+    { files: ['.converge-argv'] });
+  assert.equal(apr.status, 200, JSON.stringify(apr.body));
+  const argv = JSON.parse(fs.readFileSync(path.join(dir, '.converge-argv'), 'utf8'));
+  const mIdx = argv.indexOf('--model');
+  assert.ok(mIdx >= 0, `argv lacks --model: ${argv.join(' ')}`);
+  assert.equal(argv[mIdx + 1], 'swe-2-high');
+});
+
+// Profile materialization inside project sync: `sync` on a registered
+// project must write specialist profile artifacts into the project tree
+// (agent docs + merged mcp config) — regression for profiles never
+// landing unless the user ran `profile --sync <id>` by hand.
+test('sync: enabled profiles materialize into the project', async () => {
+  const dir = path.join(PROJ_DIR, 'prof-sync');
+  makeProject('prof-sync');
+  writeProj(dir, '.agents/onboarding-state.json', JSON.stringify({
+    schemaVersion: 1, kitCommit: 'x', manifestHash: 'x', artifacts: {},
+  }));
+  const r = cli(['sync', '--project', dir]);
+  assert.equal(r.code, 0, `sync failed: ${r.err}\n${r.out}`);
+  assert.ok(fs.existsSync(path.join(dir, '.devin', 'agents', 'qa-agent.md')),
+    'profile agent doc materialized by project sync');
+  const cfg = JSON.parse(fs.readFileSync(
+    path.join(dir, '.devin', 'mcp_config.local.json'), 'utf8'));
+  assert.ok(cfg.mcpServers?.['chrome-devtools'],
+    'profile specialist server merged into project config');
+  // --no-profiles keeps the old behavior.
+  const dir2 = path.join(PROJ_DIR, 'prof-sync-off');
+  makeProject('prof-sync-off');
+  writeProj(dir2, '.agents/onboarding-state.json', JSON.stringify({
+    schemaVersion: 1, kitCommit: 'x', manifestHash: 'x', artifacts: {},
+  }));
+  const r2 = cli(['sync', '--project', dir2, '--no-profiles']);
+  assert.equal(r2.code, 0, `sync --no-profiles failed: ${r2.err}`);
+  assert.ok(!fs.existsSync(path.join(dir2, '.devin', 'agents', 'qa-agent.md')),
+    '--no-profiles skips profile materialization');
 });

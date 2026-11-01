@@ -302,6 +302,7 @@ export function createUiServer(opts = {}) {
 
   const jobView = job => ({
     id: job.id, planId: job.planId, target: job.target, runner: job.runner,
+    model: job.model,
     status: job.status, startedAt: job.startedAt, endedAt: job.endedAt,
     error: job.error, logTail: job.log.slice(-8000),
     changes: job.changes?.map(c => ({
@@ -312,8 +313,7 @@ export function createUiServer(opts = {}) {
     placeholdersLeft: job.status !== 'running' ? job.left : undefined,
   });
 
-  /** Start a converge job for a plan that already applied. */
-  const startConverge = (plan, runnerKey) => {
+  const startConverge = (plan, runnerKey, model) => {
     const existing = [...convergeJobs.values()]
       .find(j => j.planId === plan.id && j.status === 'running');
     if (existing) throw httpError(409, `converge already running: job ${existing.id}`);
@@ -329,12 +329,12 @@ export function createUiServer(opts = {}) {
     });
     const job = {
       id: crypto.randomUUID(), planId: plan.id, target: plan.target,
-      runner: runnerKey, status: 'running', startedAt: new Date().toISOString(),
+      runner: runnerKey, model, status: 'running', startedAt: new Date().toISOString(),
       endedAt: null, error: null, log: '', left: undefined, kill: null,
       staging, changes: null, appliedSet: new Set(),
     };
     const res = spawnRunnerAsync(runnerKey, prompt, {
-      cwd: staging,
+      cwd: staging, model,
       onData: chunk => { job.log = capLog(job.log, chunk); },
     });
     if (!res.ok) { rmStaging(staging); throw httpError(400, res.error); }
@@ -1477,7 +1477,8 @@ export function createUiServer(opts = {}) {
         }
       }
       const runnerKey = body.runner || plan.resolveWith || plan.agent;
-      const job = startConverge(plan, runnerKey);
+      const job = startConverge(plan, runnerKey,
+        body.model ? String(body.model) : undefined);
       sendJson(res, 202, jobView(job));
       return;
     }

@@ -53,6 +53,8 @@ export function listRunners(opts = {}) {
     binary: r.detect,
     available: which(r.detect),
     spawn: r.spawn,
+    modelFlag: r.modelFlag,
+    modelHint: r.modelHint,
     notes: r.notes,
   }));
 }
@@ -110,8 +112,16 @@ function prepareRunner(runnerKey, prompt, opts = {}) {
     if (t.includes('{PROMPT_TEXT}')) return t.replace('{PROMPT_TEXT}', prompt);
     return t;
   });
+  // Model pin: appended (not templated) so spawn lines stay copy-pasteable;
+  // spawnSync uses no shell so '--model=<v>' or '--model v' both work.
+  if (opts.model && runner.modelFlag) {
+    argv.push(runner.modelFlag, String(opts.model));
+  }
   return { ok: true, argv, binary: runner.detect, tmpDir };
 }
+
+// Test seam for argv construction (never spawns).
+export { prepareRunner };
 
 /**
  * Spawn a runner without blocking the event loop — the converge job runs

@@ -61,6 +61,17 @@ function kitCommitExists(commit) {
   }
 }
 
+/** which(1)-equivalent for the MCP command check. */
+function commandExists(binary) {
+  const cmd = process.platform === 'win32' ? 'where' : 'which';
+  try {
+    execFileSync(cmd, [binary], { stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Extract the project-relative path an override references. Pin/skip entries
  * may be whole paths (AGENTS.md) or managed key ids (<path>:<dotted.key>) -
@@ -274,10 +285,11 @@ function printHuman(report) {
 
 /**
  * doctor [--project NAME] [--json] [--stale-days N] [--manifest <path>]
+ *         [--mcp]   also verify each manifest MCP server command is on PATH
  *
  * @param {Record<string, *>} opts Parsed flags.
  */
-export function commandDoctor(opts) {
+export async function commandDoctor(opts) {
   if (opts.project === true) throw new Error('Missing value for --project <name|path>');
   const staleDays = opts['stale-days'] !== undefined && opts['stale-days'] !== true
     ? Number(opts['stale-days']) : DEFAULT_STALE_DAYS;
@@ -316,6 +328,37 @@ export function commandDoctor(opts) {
     staleDays,
     projects: projects.map(e => checkProject(e, ctx)),
   };
+  // Kit-level MCP check (--mcp): every manifest server command must
+  // resolve on PATH, and pinned versions are compared to the registry's
+  // latest so a stale pin surfaces as a warning (bump with `mcp-versions
+  // --bump`). Catches "MCP subprocess closed stdout before
+  // responding"-style failures caused by a missing binary (uvx/npx) or
+  // unpinned first-run downloads — the runner's timeout is what reports
+  // the subprocess death, not the server itself.
+  if (opts.mcp || opts['check-mcp']) {
+    const { checkMcpVersions } = await import('./mcp-versions.mjs');
+    const mcp = [];
+    for (const s of ctx.manifest.mcpServers || []) {
+      const cmd = s.config?.command;
+      if (!cmd) continue;
+      const ok = commandExists(cmd);
+      mcp.push({ name: s.name, command: cmd, available: ok, required: !!s.required });
+    }
+    report.mcp = mcp;
+    const vers = await checkMcpVersions(ctx.manifest, { offline: !!opts.offline });
+    report.mcpVersions = vers;
+    if (!opts.json) {
+      for (const m of mcp) {
+        if (!m.available) {
+          console.log(`  MCP [${m.required ? 'required' : 'optional'}] ${m.name}: '${m.command}' not on PATH — subprocess will die before the handshake`);
+        }
+      }
+      for (const v of vers) {
+        if (v.stale) console.log(`  MCP ${v.name}: pinned ${v.pinned}, latest ${v.latest} — run mcp-versions --bump`);
+        else if (v.error && v.error !== 'unpinned') console.log(`  MCP ${v.name}: ${v.error}`);
+      }
+    }
+  }
   const totalFindings = report.projects.reduce((n, p) => n + p.findings.length, 0);
   report.summary = { totalFindings };
   report.exitCode = totalFindings > 0 ? 3 : 0;

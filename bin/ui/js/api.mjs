@@ -38,8 +38,8 @@ export const api = {
     request('POST', `/api/onboard/plans/${enc(planId)}/apply`, { accepted, content }),
   onboardResolve: (planId, artifact, runner) =>
     request('POST', `/api/onboard/plans/${enc(planId)}/resolve`, { artifact, runner }),
-  onboardConverge: ({ planId, project, runner }) =>
-    request('POST', '/api/onboard/converge', { planId, project, runner }),
+  onboardConverge: ({ planId, project, runner, model }) =>
+    request('POST', '/api/onboard/converge', { planId, project, runner, model }),
   onboardJob: jobId => request('GET', `/api/onboard/jobs/${enc(jobId)}`),
   onboardJobCancel: jobId => request('POST', `/api/onboard/jobs/${enc(jobId)}/cancel`),
   onboardJobApprove: (jobId, files) =>

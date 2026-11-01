@@ -481,16 +481,16 @@ function upsertRegistryEntry(projectRoot, { name = null, agents = [] } = {}) {
  * then (unless dryOnly) write the changed files back. Shared by scaffold
  * apply and the adopted-project sync path.
  */
-async function runConverge(projectRoot, runnerKey, applied, { dryOnly = false } = {}) {
+async function runConverge(projectRoot, runnerKey, applied, { dryOnly = false, model } = {}) {
   const { buildConvergePrompt, spawnRunner, stageTree,
     diffStagedTree, applyStagedFile, rmStaging } =
     await import('./lib/agent-spawn.mjs');
   const staging = stageTree(projectRoot);
-  console.log(`Converging with ${runnerKey} in staged copy ${staging}...`);
+  console.log(`Converging with ${runnerKey}${model ? ` [model: ${model}]` : ''} in staged copy ${staging}...`);
   const prompt = buildConvergePrompt({
     target: staging, runner: runnerKey, applied,
   });
-  const out = spawnRunner(runnerKey, prompt, { cwd: staging });
+  const out = spawnRunner(runnerKey, prompt, { cwd: staging, model });
   if (!out.ok) {
     rmStaging(staging);
     throw new Error(`converge failed: ${out.error}`);
@@ -566,7 +566,7 @@ async function commandOnboard(opts) {
             && r.artifact !== '(project)')
           .map(r => r.artifact);
         await runConverge(projectRoot, runnerKey, applied,
-          { dryOnly: !!opts['converge-dry'] });
+          { dryOnly: !!opts['converge-dry'], model: opts.model });
       }
       return;
     }
@@ -652,7 +652,7 @@ async function commandOnboard(opts) {
     if (runnerKey) {
       await runConverge(projectRoot, runnerKey,
         plan.map(r => r.artifact).filter(a => a !== '(project)'),
-        { dryOnly: !!opts['converge-dry'] });
+        { dryOnly: !!opts['converge-dry'], model: opts.model });
       return;
     }
     console.log('Onboarding applied. Run again with --converge (or converge in the UI) to fill {{placeholders}}.');
@@ -775,6 +775,23 @@ function commandProfile(opts) {
     return;
   }
 
+  // --sync with no id: sync every enabled profile (user scope only unless
+  // --project is given). This is the alias/materialization pass users
+  // expect from a bare "sync" — project sync also calls this per project.
+  if (opts.sync === true) {
+    const projectRoot0 = opts.project ? resolveProjectPath(opts.project) : null;
+    let dirty = false;
+    for (const profile of profiles.filter(p => !p.disabled)) {
+      const plan0 = planProfile(profile, manifest, projectRoot0);
+      const results0 = applyProfilePlan(plan0, profile, state, { projectRoot: projectRoot0 });
+      dirty = true;
+      const writes = results0.filter(r => !['exists-skip', 'skip-no-project'].includes(r.action));
+      console.log(`${profile.id}: ${writes.length ? writes.map(r => `${r.action} ${r.dest}`).join(', ') : 'up to date'}`);
+    }
+    if (dirty) saveProfileState(state);
+    return;
+  }
+
   const id = String(opts.plan || opts.sync);
   const profile = profiles.find(p => p.id === id);
   if (!profile) throw new Error(`unknown profile '${id}' — run profile --list`);
@@ -814,18 +831,19 @@ const USAGE = `Usage:
   node bin/onboard.mjs record-state --path P [--manifest <path>] [--dry-run]
   node bin/onboard.mjs onboard --target <path> [--profile <profile>] [--agent <runner>]
                              [--resolve-with <runner>] [--apply] [--json] [--scaffold]
-                             [--converge [--converge-with <runner>] | --converge-dry]
+                             [--converge [--converge-with <runner>] [--model <m>] | --converge-dry]
                              [--install-skills] [--update-skills] [--force]
                              (adopted projects: runs sync instead of scaffold)
   node bin/onboard.mjs inject-regions --path P [--manifest <path>] [--dry-run]
   node bin/onboard.mjs sync [--project NAME] [--dry-run] [--force] [--json]
                           [--update-skills] [--install-skills] [--adopt] [--prune]
-                          [--restore-deleted] [--manifest <path>]
+                          [--restore-deleted] [--no-profiles] [--manifest <path>]
   node bin/onboard.mjs doctor [--project NAME] [--json] [--stale-days N]
-                          [--manifest <path>]
+                          [--mcp] [--manifest <path>]
   node bin/onboard.mjs profile --list [--json]
   node bin/onboard.mjs profile --plan <id> [--project <path>] [--json]
-  node bin/onboard.mjs profile --sync <id> [--project <path>]
+  node bin/onboard.mjs profile --sync [<id>] [--project <path>]
+                          (no id: sync every enabled profile)
   node bin/onboard.mjs profile --create <id> [--label <txt>]
                           [--skills a,b] [--mcps a,b] [--harnesses a,b]
                           [--alias <name>] [--scope global|project]
@@ -833,7 +851,46 @@ const USAGE = `Usage:
   node bin/onboard.mjs profile --update <id> (same field flags as --create,
                           plus [--disabled|--no-disabled]; kit profiles store overrides)
   node bin/onboard.mjs profile --delete <id>
+  node bin/onboard.mjs mcp-versions [--bump] [--only a,b] [--json]
+                          (check pinned MCP server versions; --bump updates
+                          the manifest to the registry latest)
   node bin/onboard.mjs ui [--port 4173]`;
+
+/**
+ * mcp-versions [--bump] [--only a,b] [--json]
+ *
+ * Compare pinned MCP server versions in the manifest against the registry
+ * (npm view / PyPI JSON). --bump rewrites the pin to latest and saves the
+ * manifest; specialist servers left @latest are reported, never bumped.
+ */
+async function commandMcpVersions(opts) {
+  const { checkMcpVersions, bumpMcpVersions } =
+    await import('./lib/mcp-versions.mjs');
+  const manifestPath = resolveManifestPath(opts.manifest);
+  const manifest = readJson(manifestPath);
+  const only = opts.only ? String(opts.only).split(',') : null;
+
+  if (opts.bump) {
+    const { rows, changed } = await bumpMcpVersions(manifestPath, manifest, { only });
+    if (opts.json) { console.log(JSON.stringify({ changed, rows }, null, 2)); return; }
+    if (!changed.length) console.log('All pins already at latest.');
+    for (const c of changed) console.log(`${c.name}: ${c.was} -> ${c.now}`);
+    return;
+  }
+
+  const rows = await checkMcpVersions(manifest);
+  if (opts.json) { console.log(JSON.stringify(rows, null, 2)); return; }
+  for (const r of rows) {
+    const pin = r.pinned || (r.error === 'unpinned' ? 'latest' : 'n/a');
+    const status = r.stale ? `STALE (latest ${r.latest})`
+      : r.error ? `note: ${r.error}`
+      : r.pinned ? 'current' : 'unpinned';
+    console.log(`  ${r.name.padEnd(20)} ${pin.padEnd(12)} ${status}`);
+  }
+  if (rows.some(r => r.stale)) {
+    console.log('hint: node bin/onboard.mjs mcp-versions --bump');
+  }
+}
 
 /**
  * CLI entry point.
@@ -849,7 +906,10 @@ function main(argv) {
     case 'record-state': commandRecordState(opts); break;
     case 'sync': commandSync(opts); break;
     case 'inject-regions': commandInjectRegions(opts); break;
-    case 'doctor': commandDoctor(opts); break;
+    case 'doctor': commandDoctor(opts).catch(err => {
+      console.error(`ERROR: ${err.message}`);
+      process.exit(1);
+    }); break;
     case 'ui': commandUi(opts).catch(err => {
       console.error(`ERROR: ${err.message}`);
       process.exit(1);
@@ -859,6 +919,10 @@ function main(argv) {
       process.exit(1);
     }); break;
     case 'profile': commandProfile(opts); break;
+    case 'mcp-versions': commandMcpVersions(opts).catch(err => {
+      console.error(`ERROR: ${err.message}`);
+      process.exit(1);
+    }); break;
     case undefined:
     case 'help':
       console.log(USAGE);

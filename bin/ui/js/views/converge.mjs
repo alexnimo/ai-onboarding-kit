@@ -16,13 +16,28 @@ import { renderDiff } from './diffview.mjs';
  *   the start button is always rendered).
  */
 export function renderConverge({ planId = null, project = null, runner = undefined } = {}) {
-  const state = { job: null, jobTimer: null, approveSel: null, open: new Map() };
+  const state = {
+    job: null, jobTimer: null, approveSel: null, open: new Map(),
+    runners: null,                         // listRunners() once fetched
+    runner: runner ?? localStorage.getItem('aok.converge.runner') ?? null,
+    model: localStorage.getItem('aok.converge.model') ?? '',
+  };
+  // Runner catalog is per-server; fetch lazily — the panel works before the
+  // request resolves (falls back to the server-picked default runner).
+  api.onboardAgents().then(r => { state.runners = r.agents || []; render(); })
+    .catch(() => {});
 
   async function converge() {
     if (state.job?.status === 'running') return;
     try {
-      state.job = await api.onboardConverge({ planId, project, runner });
-      toast(`Converge started via ${state.job.runner}`, 'ok');
+      localStorage.setItem('aok.converge.runner', state.runner || '');
+      localStorage.setItem('aok.converge.model', state.model || '');
+      state.job = await api.onboardConverge({
+        planId: planId ?? undefined, project: project ?? undefined,
+        runner: state.runner || undefined,
+        model: state.model || undefined,
+      });
+      toast(`Converge started via ${state.job.runner}${state.job.model ? ` (${state.job.model})` : ''}`, 'ok');
       pollJob();
     } catch (err) {
       toast(`Converge failed to start: ${err.message}`, 'error');
@@ -150,6 +165,27 @@ export function renderConverge({ planId = null, project = null, runner = undefin
     const j = state.job;
     const kids = [el('h2', {}, 'AI converge')];
     if (!j || j.status !== 'running') {
+      const controls = [];
+      if (state.runners) {
+        const avail = state.runners.filter(r => r.available);
+        controls.push(el('select', {
+          'aria-label': 'Runner', class: 'converge-runner',
+          onchange: e => { state.runner = e.target.value || null; render(); },
+        },
+          el('option', { value: '' }, avail[0] ? `Default (${avail[0].name})` : 'No runners detected'),
+          avail.map(r => el('option', {
+            value: r.name, selected: state.runner === r.name,
+          }, r.name))));
+        const sel = avail.find(r => r.name === state.runner) || avail[0];
+        if (sel?.modelFlag) {
+          controls.push(el('input', {
+            type: 'text', class: 'converge-model',
+            'aria-label': 'Model', placeholder: 'model (default)',
+            value: state.model, title: sel.modelHint || '',
+            oninput: e => { state.model = e.target.value; },
+          }));
+        }
+      }
       kids.push(el('p', {},
         el('button', {
           type: 'button', class: 'button primary',
@@ -157,8 +193,9 @@ export function renderConverge({ planId = null, project = null, runner = undefin
           onclick: converge,
         }, j ? 'Re-run converge' : 'Converge with agent'),
         ' ',
+        ...controls,
         el('span', { class: 'muted' },
-          'Runs in a staged copy — the project is untouched until you approve the diff.')));
+          ' Runs in a staged copy — the project is untouched until you approve the diff.')));
     }
     if (j) {
       kids.push(el('div', { class: 'details' },
@@ -166,7 +203,7 @@ export function renderConverge({ planId = null, project = null, runner = undefin
           el('span', {
             class: `badge badge-${j.status === 'done' ? 'ok' : j.status === 'running' ? 'neutral' : 'conflict'}`,
           }, `converge: ${j.status}`),
-          ` via ${j.runner}`,
+          ` via ${j.runner}${j.model ? ` [${j.model}]` : ''}`,
           j.status === 'running'
             ? el('button', { type: 'button', class: 'button', onclick: cancelJob }, ' Cancel')
             : null),

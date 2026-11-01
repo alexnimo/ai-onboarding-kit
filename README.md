@@ -88,12 +88,16 @@ node bin/onboard.mjs onboard --target <path> --profile devin --apply   # apply e
 
 **Already-onboarded project?** `onboard` detects `.agents/onboarding-state.json` and switches to the continuous-sync flow instead of scaffolding: `--json` prints the sync dry-run, `--apply` runs the real three-way sync (plus `--converge` when flagged), and the default review mode prints a `#/sync?path=<project>` URL — the sync view hosts the same staged **Converge with agent** panel. Pass `--scaffold` to force the scaffold plan anyway (e.g. adding another agent's config). The dashboard onboard form does the same routing automatically.
 
+**Converge picker.** The converge panel (onboard review *and* sync view) offers a runner dropdown (PATH-detected) plus a free-text model field with runner-specific hints — appended to the runner command via the manifest's `modelFlag`. Choices persist in `localStorage`. CLI equivalent: `--converge-with <runner> --model <name>`; `--converge` alone uses `resolve-with`/`agent`/`devin`.
+
 ### The Web UI
 
 `node bin/onboard.mjs ui [--port 4173]` serves a zero-dependency SPA plus JSON API on `127.0.0.1` only (Ctrl-C to stop). It's used in two places:
 
 - **Onboarding review** (`#/onboard?plan=<id>`) — created automatically by `onboard` without `--apply`/`--json`.
 - **Fleet dashboard** (`#/`) — registered projects with agents, last sync, last result. Per project: **Sync** opens a dry-run classify table (nothing written), where every `fast-forward`/`merged`/`conflict` row expands to a unified diff and conflicts open a three-pane base/project/kit view. Apply stays disabled until every conflict has a disposition. **History** shows past applies. `#/profiles` manages specialist profiles.
+
+- **Project sync materializes profiles.** `sync` also applies every enabled specialist profile into the project (agent docs, merged MCP configs, aliases) — no separate `profile --sync` needed. `sync --no-profiles` opts out; `profile --sync` with no id syncs all enabled profiles user-scope-wide.
 
 The server binds loopback only, rejects foreign `Host`/`Origin` headers, and requires `Content-Type: application/json` on mutating routes. Plan ids live in memory for the server's lifetime — restarting the server invalidates an open review page.
 
@@ -207,13 +211,18 @@ node bin/onboard.mjs inject-regions --path P [--agents a,b] [--manifest <path>] 
 # Sync + health
 node bin/onboard.mjs sync [--project NAME] [--dry-run] [--force] [--json]
                           [--update-skills] [--install-skills] [--adopt] [--prune]
-                          [--restore-deleted] [--manifest <path>]
-node bin/onboard.mjs doctor [--project NAME] [--json] [--stale-days N] [--manifest <path>]
+                          [--restore-deleted] [--no-profiles] [--manifest <path>]
+node bin/onboard.mjs doctor [--project NAME] [--json] [--stale-days N]
+                          [--mcp] [--manifest <path>]
+
+# MCP server versions (core servers pinned; doctor --mcp warns when stale)
+node bin/onboard.mjs mcp-versions [--bump] [--only a,b] [--json]
 
 # Specialist profiles
 node bin/onboard.mjs profile --list [--json]
 node bin/onboard.mjs profile --plan <id> [--project <path>] [--json]
-node bin/onboard.mjs profile --sync <id> [--project <path>]
+node bin/onboard.mjs profile --sync [<id>] [--project <path>]
+                             (no id: every enabled profile)
 node bin/onboard.mjs profile --create <id> [--label <txt>] [--skills a,b] [--mcps a,b]
                           [--harnesses a,b] [--alias <name>] [--scope global|project]
                           [--copy-auth] [--no-core-mcp] [--description <txt>]
