@@ -209,7 +209,14 @@ export function renderConverge({ planId = null, project = null, runner = undefin
             : null),
         j.error ? el('p', { class: 'bad' }, j.error) : null,
         j.status === 'done' ? changesTable(j) : null,
-        j.logTail ? el('details', {},
+        j.logTail ? el('details', {
+          // replaceChildren rebuilds the node every poll — bind the open
+          // flag to component state so "Agent output" stays expanded.
+          open: !!state.open.get('log'),
+          ontoggle: e => {
+            e.target.open ? state.open.set('log', true) : state.open.delete('log');
+          },
+        },
           el('summary', {}, 'Agent output'),
           el('pre', { class: 'diff' }, j.logTail)) : null));
     }

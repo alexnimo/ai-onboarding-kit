@@ -41,11 +41,11 @@ export const api = {
   onboardConverge: ({ planId, project, runner, model }) =>
     request('POST', '/api/onboard/converge', { planId, project, runner, model }),
   onboardJob: jobId => request('GET', `/api/onboard/jobs/${enc(jobId)}`),
-  onboardJobCancel: jobId => request('POST', `/api/onboard/jobs/${enc(jobId)}/cancel`),
+  onboardJobCancel: jobId => request('POST', `/api/onboard/jobs/${enc(jobId)}/cancel`, {}),
   onboardJobApprove: (jobId, files) =>
     request('POST', `/api/onboard/jobs/${enc(jobId)}/approve`, files ? { files } : {}),
   onboardJobDiscard: jobId =>
-    request('POST', `/api/onboard/jobs/${enc(jobId)}/discard`),
+    request('POST', `/api/onboard/jobs/${enc(jobId)}/discard`, {}),
   profiles: () => request('GET', '/api/profiles'),
   profilePlan: (id, project) =>
     request('GET', `/api/profiles/${enc(id)}/plan${project ? `?project=${enc(project)}` : ''}`),

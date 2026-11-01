@@ -32,6 +32,16 @@ import {
   sha256,
 } from './common.mjs';
 import { isObject } from './sync-utils.mjs';
+import { execFileSync } from 'node:child_process';
+
+/** PATH probe for the copyOmpAuth guard. */
+function whichBinary(binary) {
+  try {
+    execFileSync(process.platform === 'win32' ? 'where' : 'which',
+      [binary], { stdio: 'pipe' });
+    return true;
+  } catch { return false; }
+}
 
 export const PROFILES_USER_PATH = path.join(KIT_ROOT, 'profiles.user.json');
 export const CORE_MCP_TIER = 'core';
@@ -642,6 +652,12 @@ function copyOmpAuth(profile, home, projectRoot = null) {
   const configDir = isProject ? path.join(projectRoot, '.omp') : null;
 
   // 1. Provider credentials via the omp CLI (handles OAuth + API keys).
+  // Surface a missing binary as an error, not a silent spawn failure.
+  if (!whichBinary('omp')) {
+    results.push({ dest: 'omp credentials',
+      action: 'error: omp not on PATH — install omp or unset copyAuth' });
+    return results;
+  }
   const exp = spawnSync('omp', ['auth', 'export'],
     { encoding: 'utf8', timeout: 30000 });
   if (exp.error || exp.status !== 0) {

@@ -404,15 +404,21 @@
   "onboardingAgents": {
     "devin": {
       "detect": "devin",
-      "spawn": "devin -p --prompt-file {PROMPT_FILE} --permission-mode yolo --respect-workspace-trust false --export"
+      "spawn": "devin -p --prompt-file {PROMPT_FILE} --permission-mode yolo --respect-workspace-trust false --export",
+      "modelFlag": "--model",
+      "modelHint": "account model e.g. claude-sonnet-4, opus, codex (devin models lists yours)"
     },
     "claude": {
       "detect": "claude",
-      "spawn": "claude -p {PROMPT_TEXT} --permission-mode bypassPermissions"
+      "spawn": "claude -p {PROMPT_TEXT} --permission-mode bypassPermissions",
+      "modelFlag": "--model",
+      "modelHint": "alias or full name e.g. sonnet, opus, claude-sonnet-4-6"
     },
     "omp": {
       "detect": "omp",
-      "spawn": "omp -p --auto-approve {PROMPT_FILE_ARG}"
+      "spawn": "omp -p --auto-approve {PROMPT_FILE_ARG}",
+      "modelFlag": "--model",
+      "modelHint": "fuzzy ok e.g. swe-2-high, opus, gpt-5.2; provider prefix: openai/gpt-5.2"
     },
     "opencode": {
       "detect": "opencode",

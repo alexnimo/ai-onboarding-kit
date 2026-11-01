@@ -79,6 +79,9 @@ export function spawnRunner(runnerKey, prompt, opts = {}) {
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
       shell: false,
+      // Same stdin fix as spawnRunnerAsync: an open stdin reads as an
+      // interactive prompt to runners like omp -p and hangs the resolve.
+      input: '',
     });
     if (res.error) return { stdout: res.stdout || '', ok: false, error: `${prep.binary}: ${res.error.message}` };
     if (res.status !== 0) {
@@ -138,6 +141,10 @@ export function spawnRunnerAsync(runnerKey, prompt, opts = {}) {
     cwd: opts.cwd || process.cwd(),
     shell: false,
     windowsHide: true,
+    // stdin ignored: an interactive-runner CLI (omp -p) treats an open
+    // stdin as a prompt and blocks forever — the converge loop the user
+    // saw was the agent waiting for input it could never receive.
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
   const cleanup = () => fs.rmSync(prep.tmpDir, { recursive: true, force: true });
   let timedOut = false;
