@@ -128,8 +128,8 @@
       "tier": "core",
       "hint": "Code search — install via MCP config",
       "config": {
-        "command": "npx",
-        "args": ["-y", "@semblemcp/server"],
+        "command": "uvx",
+        "args": ["--from", "semble[mcp]", "semble"],
         "env": {}
       }
     },
@@ -139,8 +139,8 @@
       "tier": "core",
       "hint": "Impact analysis graph — install via MCP config",
       "config": {
-        "command": "npx",
-        "args": ["-y", "@code-review-graph/mcp-server"],
+        "command": "uvx",
+        "args": ["code-review-graph", "serve"],
         "env": {}
       }
     },

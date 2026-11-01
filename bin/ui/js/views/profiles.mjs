@@ -258,6 +258,8 @@ export function renderProfiles() {
     form.elements.label.value = p.label || '';
     form.elements.description.value = p.description || '';
     if (form.elements.alias) form.elements.alias.value = p.alias || '';
+    if (form.elements.copyAuth) form.elements.copyAuth.checked = !!p.copyAuth;
+    if (form.elements.includeCoreMcp) form.elements.includeCoreMcp.checked = p.includeCoreMcp !== false;
     for (const name of ['skills', 'cliTools', 'mcpServers', 'harnesses']) {
       const values = new Set(
         name === 'skills'
@@ -297,6 +299,8 @@ export function renderProfiles() {
           .map(b => b.value),
         harnesses: harnesses.checked(),
         alias: form.elements.alias?.value.trim() || '',
+        copyAuth: !!form.elements.copyAuth?.checked,
+        includeCoreMcp: !!form.elements.includeCoreMcp?.checked,
       };
       try {
         if (state.editing) {
@@ -475,6 +479,14 @@ export function renderProfiles() {
       el('fieldset', {},
         el('legend', {}, 'Harnesses'),
         harnesses.nodes.length ? harnesses.nodes : el('p', { class: 'muted' }, 'None in catalog')),
+      el('p', {},
+        el('label', {},
+          el('input', { type: 'checkbox', name: 'copyAuth' }),
+          ' Reuse default omp credentials (auth export/import + config.yml on sync; off = set up login yourself)'),
+        ' ',
+        el('label', {},
+          el('input', { type: 'checkbox', name: 'includeCoreMcp', checked: true }),
+          ' Include core MCP servers (semble, code-review-graph — unchecked = only the servers picked above)')),
       el('p', { dataset: { kitOnly: '' }, hidden: true },
         el('label', {},
           el('input', { type: 'checkbox', name: 'disabled' }),

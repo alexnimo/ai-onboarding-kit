@@ -23,6 +23,7 @@
 
 import fs from 'node:fs';
 import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import {
   KIT_ROOT,
@@ -111,7 +112,7 @@ function pickDefined(o) {
  * @returns {Array<{name:string, config:object, tier:string}>} Resolved
  *   specialist servers, plus `core` entries when includeCore.
  */
-export function resolveServers(profile, manifest, { includeCore = true } = {}) {
+export function resolveServers(profile, manifest, { includeCore = profile.includeCoreMcp !== false } = {}) {
   const byName = new Map();
   for (const s of manifest.mcpServers || []) byName.set(s.name, s);
   for (const s of profile.inlineMcpServers || []) byName.set(s.name, s);
@@ -441,6 +442,55 @@ export function applyProfilePlan(plan, profile, state, { home = os.homedir() } =
   if (plan.artifacts.some(a => a.absPath.includes(
       `${path.sep}.ai-onboarding-kit${path.sep}aliases`))) {
     results.push(...ensureAliasBlock({ home }));
+  }
+  // Opt-in: reuse the default profile's provider credentials + settings for
+  // this profile (omp auth export -> --profile <id> auth import, plus
+  // config.yml when absent). Off => the profile starts unauthenticated and
+  // the user runs `omp --profile <id> login` themselves.
+  if (profile.copyAuth && (profile.harnesses || []).includes('omp')) {
+    results.push(...copyOmpAuth(profile, home));
+  }
+  return results;
+}
+
+/**
+ * Copy omp provider credentials (auth export/import) and config.yml from the
+ * default (unnamed) profile into `<home>/.omp/profiles/<id>/agent/`.
+ * Best-effort per step; failures surface as result rows, not throws.
+ */
+function copyOmpAuth(profile, home) {
+  const results = [];
+  const agentDir = path.join(home, '.omp', 'profiles', profile.id, 'agent');
+
+  // 1. Provider credentials via the omp CLI (handles OAuth + API keys).
+  const exp = spawnSync('omp', ['auth', 'export'],
+    { encoding: 'utf8', timeout: 30000 });
+  if (exp.error || exp.status !== 0) {
+    results.push({ dest: 'omp credentials',
+      action: `skip: auth export failed (${exp.error?.message || `exit ${exp.status}`})` });
+  } else {
+    const imp = spawnSync('omp', ['--profile', profile.id, 'auth', 'import', '-'],
+      { input: exp.stdout, encoding: 'utf8', timeout: 30000 });
+    results.push({
+      dest: `omp --profile ${profile.id} credentials`,
+      action: imp.error || imp.status !== 0
+        ? `error: ${imp.error?.message || `exit ${imp.status}`}`
+        : 'imported',
+    });
+  }
+
+  // 2. Provider/model settings: copy config.yml only when the profile has
+  // none of its own (don't clobber customization).
+  const src = path.join(home, '.omp', 'agent', 'config.yml');
+  const dst = path.join(agentDir, 'config.yml');
+  if (fs.existsSync(dst)) {
+    results.push({ dest: dst, action: 'exists-skip' });
+  } else if (!fs.existsSync(src)) {
+    results.push({ dest: dst, action: 'skip: no ~/.omp/agent/config.yml to copy' });
+  } else {
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.copyFileSync(src, dst);
+    results.push({ dest: dst, action: 'copied' });
   }
   return results;
 }

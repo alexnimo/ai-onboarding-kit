@@ -108,7 +108,7 @@ const PLAN_TTL_MS = 30 * 60 * 1000;
 const PROFILE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 // Fields the UI/PUT routes may write onto user profiles or kit overrides.
 const PROFILE_EDITABLE = ['label', 'description', 'skills', 'cliTools',
-  'mcpServers', 'harnesses', 'alias', 'disabled'];
+  'mcpServers', 'harnesses', 'alias', 'disabled', 'copyAuth', 'includeCoreMcp'];
 const PROFILE_LIST_FIELDS = ['skills', 'cliTools', 'mcpServers', 'harnesses'];
 
 /** Error carrying an HTTP status; anything else becomes a bare 500. */
@@ -435,7 +435,7 @@ export function createUiServer(opts = {}) {
           throw httpError(400, `${key} must be an array of strings`);
         }
         fields[key] = [...new Set(body[key])];
-      } else if (key === 'disabled') {
+      } else if (key === 'disabled' || key === 'copyAuth' || key === 'includeCoreMcp') {
         fields[key] = body[key] === true;
       } else {
         if (typeof body[key] !== 'string') {
@@ -802,6 +802,8 @@ export function createUiServer(opts = {}) {
         mcpServers: fields.mcpServers ?? [],
         harnesses: fields.harnesses ?? ['omp'],
         ...(fields.alias ? { alias: fields.alias } : {}),
+        ...(fields.copyAuth ? { copyAuth: true } : {}),
+        ...(fields.includeCoreMcp === false ? { includeCoreMcp: false } : {}),
       };
       state.profiles[id] = profile;
       saveProfilesState(state);
