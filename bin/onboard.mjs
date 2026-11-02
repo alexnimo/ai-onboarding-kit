@@ -847,7 +847,7 @@ const USAGE = `Usage:
   node bin/onboard.mjs profile --create <id> [--label <txt>]
                           [--skills a,b] [--mcps a,b] [--harnesses a,b]
                           [--alias <name>] [--scope global|project]
-                          [--copy-auth] [--no-core-mcp] [--description <txt>]
+                          [--no-copy-auth] [--no-core-mcp] [--description <txt>]
   node bin/onboard.mjs profile --update <id> (same field flags as --create,
                           plus [--disabled|--no-disabled]; kit profiles store overrides)
   node bin/onboard.mjs profile --delete <id>

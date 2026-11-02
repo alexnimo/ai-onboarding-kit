@@ -275,7 +275,7 @@ export function renderProfiles() {
     form.elements.label.value = p.label || '';
     form.elements.description.value = p.description || '';
     if (form.elements.alias) form.elements.alias.value = p.alias || '';
-    if (form.elements.copyAuth) form.elements.copyAuth.checked = !!p.copyAuth;
+    if (form.elements.copyAuth) form.elements.copyAuth.checked = p.copyAuth !== false;
     if (form.elements.includeCoreMcp) form.elements.includeCoreMcp.checked = p.includeCoreMcp !== false;
     if (form.elements.scope) form.elements.scope.value = p.scope === 'project' ? 'project' : 'global';
     for (const name of ['skills', 'cliTools', 'mcpServers', 'harnesses']) {
@@ -509,8 +509,8 @@ export function renderProfiles() {
         harnesses.nodes.length ? harnesses.nodes : el('p', { class: 'muted' }, 'None in catalog')),
       el('p', {},
         el('label', {},
-          el('input', { type: 'checkbox', name: 'copyAuth' }),
-          ' Reuse default omp credentials (auth export/import + config.yml on sync; off = set up login yourself)'),
+          el('input', { type: 'checkbox', name: 'copyAuth', checked: true }),
+          ' Reuse default omp credentials (on by default: auth export/import + config.yml on sync; uncheck = set up login yourself)'),
         ' ',
         el('label', {},
           el('input', { type: 'checkbox', name: 'includeCoreMcp', checked: true }),

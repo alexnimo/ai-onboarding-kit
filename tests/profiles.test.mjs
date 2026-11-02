@@ -51,6 +51,7 @@ const PROFILE = {
   mcpServers: ['chrome-devtools', 'playwright'],
   agent: { file: 'templates/agents/qa-agent.md.tmpl' },
   harnesses: ['omp', 'opencode', 'claude-code', 'devin'],
+  copyAuth: false, // keep applies hermetic — default-on copyAuth would spawn omp
   origin: 'kit',
 };
 
@@ -295,6 +296,8 @@ test('planProfile: project-scope without project still emits shell aliases', () 
   const sh = plan.artifacts.find(a => a.dest.endsWith(`aliases/${profile.id}.sh`));
   assert.ok(sh, 'alias artifact planned even without a project');
   assert.ok(sh.content.includes('o-qa'), 'alias name in the snippet');
+  assert.ok(sh.content.includes("relative(require('os').homedir()"),
+    'project alias emits home-relative PI_CONFIG_DIR (absolute breaks omp)');
   const proj = plan.artifacts.find(a => a.dest.endsWith('mcp.json'));
   assert.ok(proj.absPath.includes('<project>'),
     'project artifacts stay placeholders for apply to skip');
@@ -331,6 +334,50 @@ test('applyProfilePlan: stale alias file with user edits is kept', () => {
   applyProfilePlan(planProfile(noAlias, MANIFEST, null, { home }),
     noAlias, st, { home });
   assert.ok(fs.existsSync(shPath), 'user-modified alias file survives pruning');
+});
+
+// ---------- auth copy (default-on) ----------
+
+test('applyProfilePlan: copyAuth default-on pipes export into profile import', () => {
+  const home = tmp();
+  const st = state();
+  // copyAuth omitted => on. runOmpAuth fakes the omp CLI and records calls.
+  const profile = { ...PROFILE };
+  delete profile.copyAuth;
+  const calls = [];
+  const runOmpAuth = (args, opts = {}) => {
+    calls.push({ args: [...args], input: opts.input, env: opts.env });
+    if (args[0] === 'auth') return { status: 0, stdout: '{"version":1,"credentials":[{"provider":"devin"}]}' };
+    return { status: 0 };
+  };
+  const res = applyProfilePlan(planProfile(profile, MANIFEST, null, { home }),
+    profile, st, { home, runOmpAuth });
+  assert.deepEqual(calls.map(c => c.args[0]), ['auth', '--profile']);
+  assert.deepEqual(calls[1].args.slice(0, 3), ['--profile', 'qa-agent', 'auth']);
+  assert.ok(calls[1].input.includes('"devin"'), 'export stdout piped to import stdin');
+  // omp resolves PI_CONFIG_DIR relative to homedir; assert it round-trips
+  // back to the injected home rather than the real ~/.omp.
+  assert.equal(path.resolve(os.homedir(), calls[0].env.PI_CONFIG_DIR), path.join(home, '.omp'));
+  assert.equal(path.resolve(os.homedir(), calls[1].env.PI_CONFIG_DIR), path.join(home, '.omp'));
+  assert.ok(res.some(r => r.action === 'imported'));
+});
+
+test('applyProfilePlan: copyAuth:false skips auth copy entirely', () => {
+  const home = tmp();
+  const st = state();
+  const profile = { ...PROFILE }; // fixture has copyAuth:false
+  let spawned = false;
+  const res = applyProfilePlan(planProfile(profile, MANIFEST, null, { home }),
+    profile, st, { home, runOmpAuth: () => { spawned = true; return { status: 0 }; } });
+  assert.equal(spawned, false, 'no omp spawn when copyAuth is false');
+  assert.ok(!res.some(r => r.dest.includes('credentials')));
+});
+
+test('buildUserProfile: explicit copyAuth:false is preserved (opt-out)', () => {
+  const p = buildUserProfile('x', { label: 'X', copyAuth: false });
+  assert.equal(p.copyAuth, false);
+  const q = buildUserProfile('y', { label: 'Y' });
+  assert.equal(q.copyAuth, undefined, 'unset = default-on at apply time');
 });
 
 // ---------- shared field validation ----------
